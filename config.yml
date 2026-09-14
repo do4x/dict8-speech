@@ -6,42 +6,69 @@
 meta:
   app: "Dict8"
   version: "v1-mvp"
-  platform: "windows"           # LOCKED — any other OS is out of scope
+  platform: "macos"             # LOCKED — re-targeted from windows, see docs/ADR-000-platform.md
+  arch: "apple-silicon"         # LOCKED — no CUDA path exists; see ADR-000
   target_tool: "claude-code"    # LOCKED — any other AI tool is out of scope
 
-hardware:
-  gpu: "RTX 5070 Ti"
-  cuda_version: "TBD"           # nvidia-smi — pin before choosing STT backend
+hardware:                       # all four: read off the real box, never assumed
+  chip: "TBD"                   # sysctl -n machdep.cpu.brand_string
+  unified_memory_gb: "TBD"      # bounds the largest model that can stay warm in memory
+  macos_version: "TBD"          # sw_vers -productVersion
   mic_device: "TBD"             # exact device name; never assume "default"
+
+permissions:                    # macOS-only. No Windows equivalent — see ADR-000.
+  accessibility: "required"     # CGEventPost (inject) AND CGEventTap (hotkey) — one grant covers both
+  input_monitoring: "TBD"       # VERIFY in Phase 1 whether the tap also trips this separate grant
+  microphone: "required"
+  recheck_on: "every_dictation" # grant is revocable at runtime; never cached as "granted once"
+
+packaging:
+  bundle_id: "TBD"              # TCC grants attach to the signed bundle identity — must be stable
+  signing: "TBD"                # ad-hoc vs Developer ID; re-signing can reset the Accessibility grant
+  launch_at_login: "TBD"
 
 hotkey:
   push_to_talk: "TBD"           # hold-to-talk; must not collide with terminal/IDE bindings
   cancel: "TBD"                 # abort without injecting
+  mechanism: "TBD"              # cgeventtap | carbon_hotkey — decide in Phase 1
+                                # carbon_hotkey cannot bind a bare modifier (fn/right-opt); tap can
 
 stt:
-  backend: "faster-whisper"     # whisper.cpp only if the Phase 0 benchmark beats it
-  model: "TBD"                  # small.en | medium.en | large-v3-turbo — from benchmark
-  device: "cuda"
-  compute_type: "TBD"           # float16 | int8_float16 — from benchmark
-  language: "TBD"               # en | ro | auto — drives the unicode injection path
+  backend: "TBD"                # mlx-whisper | whispercpp-metal | faster-whisper-cpu — from benchmark
+                                # NOT defaulted: CTranslate2 has no Metal backend, so the seeded
+                                # "faster-whisper unless beaten" default pre-judged the benchmark
+  model: "TBD"                  # from benchmark — see stt.candidates
+  compute: "TBD"                # metal | ane | cpu — follows the winning backend
+  quantization: "TBD"           # backend-specific (q5_0, 4bit, int8, fp16) — from benchmark
+  language: "TBD"               # en | ro | auto — drives both model eligibility and injection path
   vad: true
+  candidates:                   # the Phase 0 benchmark matrix; bench reads this, nothing hardcoded
+    backends: ["mlx-whisper", "whispercpp-metal", "faster-whisper-cpu"]
+    models: ["small.en", "medium.en", "large-v3-turbo"]
+                                # FINDING: small.en/medium.en are English-only and cannot emit
+                                # Romanian. If language ends up ro|auto they are disqualified
+                                # before measurement. See bench/stt.md "Open questions".
 
 latency_budget_ms:              # acceptance criteria, not aspirations
   release_to_text_p50: 1200
   release_to_text_p95: 2500
 
 injection:
-  primary: "sendinput_unicode"
-  fallback: "clipboard_paste"   # set clipboard + toast; user pastes
+  primary: "cgevent_unicode"    # CGEventKeyboardSetUnicodeString + CGEventPost — needs Accessibility
+  fallback: "clipboard_paste"   # set pasteboard + synthesize Cmd+V — ALSO needs Accessibility
+  last_resort: "clipboard_only" # no grant at all: set pasteboard + toast, Denis pastes. Never lose a prompt.
   fallback_trigger: "TBD"       # char count and/or measured failure — decide in Phase 1
+  chunk_chars: "TBD"            # MEASURE: CGEventKeyboardSetUnicodeString drops/mangles long strings;
+                                # chunking is required, safe chunk size is a Phase 1 measurement
+  inter_chunk_delay_ms: "TBD"   # MEASURE: too fast and the target app drops characters
   restore_clipboard: true
 
 paths:
   claude_projects_glob: "TBD"   # VERIFY on disk in Phase 2. Reference layout:
                                 # ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
   claude_settings: "TBD"        # which settings file the hooks get registered in
-  db: "%LOCALAPPDATA%/Dict8/dict8.sqlite"
-  logs: "%LOCALAPPDATA%/Dict8/logs/"
+  db: "~/Library/Application Support/Dict8/dict8.sqlite"
+  logs: "~/Library/Logs/Dict8/"
 
 usage_oracle:                   # cross-check tool — NOT a runtime dependency
   tool: "claude-tokens"         # https://pypi.org/project/claude-tokens/ — MIT, stdlib only

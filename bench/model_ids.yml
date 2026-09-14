@@ -1,0 +1,24 @@
+# bench/model_ids.yml — per-backend artifact identifiers for the Phase 0 candidates.
+# Bench-only data. Model names must not live in code (CLAUDE.md invariant 3); the winner
+# gets promoted into config.yml stt.* by hand at the Phase 0 gate.
+#
+# english_only: true  => model has no language token and cannot emit Romanian.
+#                        Marked n/a on the diacritics clip rather than silently scored.
+
+small.en:
+  english_only: true
+  mlx-whisper:        "mlx-community/whisper-small.en-mlx"
+  whispercpp-metal:   "small.en"
+  faster-whisper-cpu: "small.en"
+
+medium.en:
+  english_only: true
+  mlx-whisper:        "mlx-community/whisper-medium.en-mlx"
+  whispercpp-metal:   "medium.en"
+  faster-whisper-cpu: "medium.en"
+
+large-v3-turbo:
+  english_only: false
+  mlx-whisper:        "mlx-community/whisper-large-v3-turbo"
+  whispercpp-metal:   "large-v3-turbo"
+  faster-whisper-cpu: "deepdml/faster-whisper-large-v3-turbo-ct2"

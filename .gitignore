@@ -1,0 +1,9 @@
+# Recorded speech never leaves the machine (CLAUDE.md invariant 7).
+bench/audio/
+# Benchmark output contains transcript hypotheses — i.e. things Denis said.
+# The numbers-only table in bench/stt.md is the reviewable artifact.
+bench/results.json
+
+__pycache__/
+*.pyc
+.venv/
