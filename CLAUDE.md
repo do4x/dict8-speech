@@ -64,7 +64,8 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
 - `bench/` — Phase 0 STT benchmark harness + its results table
 
 ## Out of scope for v1 — do not build, do not scaffold "for later"
-Any OS but macOS. Any tool but Claude Code. Other providers' quota routing (no local data
+Any OS but macOS. Any tool but Claude Code. Non-English dictation (v1 is English-only;
+this disqualifies nothing yet, but revisiting it changes the STT model choice). Other providers' quota routing (no local data
 exists to fit on). USD cost display. Any UI beyond tray icon + overlay + toast. Settings GUI —
 `config.yml` is the settings surface.
 

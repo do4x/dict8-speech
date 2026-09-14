@@ -50,11 +50,15 @@ from a document is marked `TBD` rather than translated by analogy.
    "whisper.cpp only if the Phase 0 benchmark beats it". On Apple Silicon that default
    pre-judges a question that the benchmark exists to answer, so it reverts to `TBD`.
 
-## Open finding — not resolved here
+## Finding — RESOLVED 2026-09-14: English-only for v1
 
 The seeded model candidates were `small.en | medium.en | large-v3-turbo`. The `.en` Whisper
 models are **English-only**: they have no language token and cannot emit Romanian text. The
 Phase 1 gate requires a dictation containing Romanian diacritics to land byte-identical.
-If Romanian is genuinely in scope for dictation, `small.en` and `medium.en` are disqualified
-before the benchmark runs and `large-v3-turbo` is the only seeded candidate left. This needs
-Denis's answer (see `bench/stt.md`, "Open questions"); it is not decided by measurement.
+Denis scoped v1 to **English only**. All three candidates therefore stay in the race and
+`stt.language` is `en` rather than `auto` — which also drops the language-detection pass from
+the hot path. The injection path must still be unicode-safe: English dictation produces curly
+quotes, em dashes and accented loanwords, and invariant 1 covers those the same way.
+
+Re-opening non-English dictation disqualifies `small.en` and `medium.en` outright and forces
+a re-run of the Phase 0 benchmark.

@@ -38,11 +38,13 @@ uv run bench/stt_bench.py record coding_prompt 20   # identifiers + punctuation,
                                                     # "rename get_user_data to fetch_user_profile
                                                     #  everywhere, then wrap it in {braces} and
                                                     #  quote the \"label\" argument"
-uv run bench/stt_bench.py record romanian 15        # a prompt with ă â î ș ț in it
+uv run bench/stt_bench.py record unicode 15         # English speech that comes out non-ASCII:
+                                                    # "she said \"don't\" — it's a café, naïve"
+                                                    # (curly quotes, em dash, accents)
 
 # then write down what you ACTUALLY said:
 #   bench/audio/coding_prompt.txt
-#   bench/audio/romanian.txt
+#   bench/audio/unicode.txt
 
 # 3. measure — one invocation per backend, results accumulate
 uv run --with mlx-whisper     bench/stt_bench.py run
@@ -64,22 +66,20 @@ than dropping it from the comparison.
 - **WER is an aid to the by-eye judgement, not the gate.** A split identifier
   (`get_user_data` → `get user data`) can score WER 1.0 on a short clip while a fluent-but-wrong
   transcript scores better. Read the hypotheses in `bench/results.json`. The Phase 1 gate is
-  whether `snake_case_id, {braces}, "quotes"` and the Romanian diacritics land byte-identical.
+  whether `snake_case_id, {braces}, "quotes"` and the non-ASCII characters land byte-identical.
 
-## Open questions — Denis decides, measurement cannot
+## Settled
 
-1. **Is Romanian dictation in scope?** `small.en` and `medium.en` are English-only: they have
-   no language token and cannot emit `ă â î ș ț` at all. The Phase 1 gate requires a dictation
-   with Romanian diacritics to land byte-identical. If that gate stands, both `.en` models are
-   disqualified before the benchmark runs and `large-v3-turbo` is the only seeded candidate
-   left — which makes this a one-horse race unless more multilingual models are added to
-   `stt.candidates.models`. If Romanian is only ever *content inside* an English prompt, the
-   same problem applies, because the model still has to emit the characters.
-   The harness marks `.en` models `n/a` on the Romanian clip rather than scoring them zero.
-2. **`stt.language`: `en`, `ro`, or `auto`?** `auto` costs a language-detection pass and can
-   flip mid-session on a short clip. This is a latency and a correctness decision, not a
-   preference.
-3. **Model size vs unified memory.** The model is held warm in memory for the life of the app
+- **English only for v1** (Denis, 2026-09-14). All three candidates stay in the race,
+  `stt.language` is `en`, and the language-detection pass is off the hot path. Re-opening
+  other languages disqualifies `small.en` and `medium.en` and forces a re-run.
+- The non-ASCII clip is **not** gone — it is now English speech that *renders* as non-ASCII
+  (curly quotes, em dash, `café`/`naïve`). Invariant 1 still has to carry those verbatim
+  through injection, and English models do emit them.
+
+## Open question — Denis decides, measurement cannot
+
+1. **Model size vs unified memory.** The model is held warm in memory for the life of the app
    alongside everything else on the machine. `hardware.unified_memory_gb` (from `probe`) is a
    real constraint on `large-v3-turbo`, and it is not visible in a transcription-time table.
 

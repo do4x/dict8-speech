@@ -17,7 +17,7 @@ Usage (from repo root):
     uv run bench/stt_bench.py devices          # pick hardware.mic_device
     uv run bench/stt_bench.py record 3s 3      # record a clip with the real mic
     uv run bench/stt_bench.py record coding_prompt 20
-    uv run bench/stt_bench.py record romanian 15
+    uv run bench/stt_bench.py record unicode 15
     uv run --with mlx-whisper bench/stt_bench.py run
     uv run --with pywhispercpp bench/stt_bench.py run
     uv run --with faster-whisper bench/stt_bench.py run
@@ -49,7 +49,7 @@ SAMPLE_RATE = 16_000
 WARM_REPS = 5
 
 TIMING_CLIPS = ["3s", "10s", "30s"]
-FIDELITY_CLIPS = ["coding_prompt", "romanian"]
+FIDELITY_CLIPS = ["coding_prompt", "unicode"]
 
 
 def load_config() -> dict:
@@ -268,7 +268,7 @@ def cmd_run(args) -> int:
                 continue
             print(f"\n=== {backend} / {model} ({model_id})")
             try:
-                row = _measure(fn, backend, model, model_id, ids[model], language)
+                row = _measure(fn, backend, model, model_id, language)
             except Exception as exc:  # a backend that cannot load is a result, not a crash
                 print(f"  FAILED: {type(exc).__name__}: {exc}")
                 row = {"backend": backend, "model": model, "error":
@@ -290,7 +290,7 @@ def _importable(backend: str) -> bool:
     return importlib.util.find_spec(mod) is not None
 
 
-def _measure(fn, backend, model, model_id, model_meta, language) -> dict:
+def _measure(fn, backend, model, model_id, language) -> dict:
     row = {"backend": backend, "model": model, "model_id": model_id, "timing": {}}
 
     t0 = time.perf_counter()
@@ -317,10 +317,8 @@ def _measure(fn, backend, model, model_id, model_meta, language) -> dict:
 
     row["fidelity"] = {}
     for clip in FIDELITY_CLIPS:
-        if clip == "romanian" and model_meta.get("english_only"):
-            row["fidelity"][clip] = {"skipped": "english-only model — cannot emit Romanian"}
-            print(f"  {clip}: n/a (english-only model)")
-            continue
+        # v1 is English-only, so no candidate is disqualified here. The english_only flag
+        # in model_ids.yml stays as the record of what re-opening other languages would cost.
         ref = reference_path(clip).read_text()
         hyp, _ = fn(model_id, str(clip_path(clip)), language)
         row["fidelity"][clip] = {
@@ -368,17 +366,16 @@ def _write_report(cfg: dict, rows: list) -> None:
     out += ["", "STT is one term in release-to-text; the budget column is headroom for "
             "capture, VAD, injection and overlay, not slack.", "",
             "### Fidelity", "",
-            "| backend | model | coding-prompt WER | Romanian WER | diacritics |",
+            "| backend | model | coding-prompt WER | unicode-clip WER | non-ASCII chars |",
             "|---|---|---|---|---|"]
     for r in sorted(rows, key=lambda r: (r["backend"], r["model"])):
         if "error" in r:
             continue
         f = r["fidelity"]
         cp = f.get("coding_prompt", {})
-        ro = f.get("romanian", {})
-        ro_cell = "n/a (english-only)" if "skipped" in ro else f"{ro.get('wer', '—')}"
-        out.append(f"| {r['backend']} | {r['model']} | {cp.get('wer', '—')} | {ro_cell} | "
-                   f"{ro.get('non_ascii', cp.get('non_ascii', '—'))} |")
+        uni = f.get("unicode", {})
+        out.append(f"| {r['backend']} | {r['model']} | {cp.get('wer', '—')} | "
+                   f"{uni.get('wer', '—')} | {uni.get('non_ascii', '—')} |")
 
     out += ["", "Hypotheses for by-eye reading are in `bench/results.json`. WER is an aid, "
             "not the gate — the gate is whether identifiers and punctuation land verbatim.",

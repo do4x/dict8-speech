@@ -40,14 +40,15 @@ stt:
   model: "TBD"                  # from benchmark — see stt.candidates
   compute: "TBD"                # metal | ane | cpu — follows the winning backend
   quantization: "TBD"           # backend-specific (q5_0, 4bit, int8, fp16) — from benchmark
-  language: "TBD"               # en | ro | auto — drives both model eligibility and injection path
+  language: "en"                # DECIDED: English-only for v1 MVP. Keeps all three candidates
+                                # eligible and drops the language-detection pass from the hot path.
   vad: true
   candidates:                   # the Phase 0 benchmark matrix; bench reads this, nothing hardcoded
     backends: ["mlx-whisper", "whispercpp-metal", "faster-whisper-cpu"]
     models: ["small.en", "medium.en", "large-v3-turbo"]
-                                # FINDING: small.en/medium.en are English-only and cannot emit
-                                # Romanian. If language ends up ro|auto they are disqualified
-                                # before measurement. See bench/stt.md "Open questions".
+                                # RESOLVED: language is "en", so the English-only models stay
+                                # eligible and all three candidates race. Adding a non-English
+                                # language later disqualifies small.en/medium.en — see ADR-000.
 
 latency_budget_ms:              # acceptance criteria, not aspirations
   release_to_text_p50: 1200

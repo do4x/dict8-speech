@@ -44,7 +44,8 @@ release with <300 ms of audio (discard silently) · focus changes between press 
 (inject into the window focused at press time, or abort and toast — pick one, document it) ·
 transcript containing Romanian diacritics and characters outside ASCII.
 GATE (all measured, not asserted): 20 consecutive real dictations, p50/p95 within
-`latency_budget_ms` · a dictation containing "aaisi" diacritics and one containing
+`latency_budget_ms` · a dictation whose transcript contains non-ASCII characters (curly quotes, em dash,
+accented loanword) and one containing
 `snake_case_id, {braces}, "quotes"` both land byte-identical · clipboard fallback exercised
 by forcing the primary path to fail, and the clipboard restored afterwards · no prompt lost
 in 20 runs.
