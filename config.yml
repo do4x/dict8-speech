@@ -11,16 +11,22 @@ meta:
   target_tool: "claude-code"    # LOCKED — any other AI tool is out of scope
 
 hardware:                       # all four: read off the real box, never assumed
-  chip: "TBD"                   # sysctl -n machdep.cpu.brand_string
-  unified_memory_gb: "TBD"      # bounds the largest model that can stay warm in memory
-  macos_version: "TBD"          # sw_vers -productVersion
-  mic_device: "TBD"             # exact device name; never assume "default"
+  chip: "Apple M5"              # sysctl -n machdep.cpu.brand_string
+  unified_memory_gb: 16         # bounds the largest model that can stay warm in memory
+  macos_version: "26.6.2"       # sw_vers -productVersion (build 25G83)
+  mic_device: "TBD"             # exact device name; an OUTPUT of the Phase 3 bench, never "default"
 
-permissions:                    # macOS-only. No Windows equivalent — see ADR-000.
-  accessibility: "required"     # CGEventPost (inject) AND CGEventTap (hotkey) — one grant covers both
-  input_monitoring: "TBD"       # VERIFY in Phase 1 whether the tap also trips this separate grant
-  microphone: "required"
+permissions:                    # TCC. All three are requested in onboarding and re-checked at launch.
+  microphone: required
+  accessibility: required       # CGEventPost (inject) AND CGEventTap (hotkey) — one grant covers both
+  input_monitoring: required    # VERIFY in Phase 4 whether the tap trips this separate grant on
+                                # this macOS version. Requested regardless: asking for a grant we
+                                # turn out not to need is a small UX cost, missing one is a silent
+                                # failure. Confirm and record, do not assume either way.
   recheck_on: "every_dictation" # grant is revocable at runtime; never cached as "granted once"
+  note: "an unsigned binary loses its TCC grants when rebuilt — use a stable signing identity
+         in dev or the permission dialogs reappear on every build"
+  on_revoked: "toast with a deep link to the right Settings pane; never fail silently"
 
 packaging:
   bundle_id: "TBD"              # TCC grants attach to the signed bundle identity — must be stable
@@ -28,22 +34,28 @@ packaging:
   launch_at_login: "TBD"
 
 hotkey:
+  mechanism: "TBD"              # cgeventtap (needs Input Monitoring, clean key-up, can bind a bare
+                                # modifier) vs carbon_hotkey / RegisterEventHotKey (no permission,
+                                # awkward for hold, CANNOT bind bare fn/right-opt) — ADR-002, Phase 3
   push_to_talk: "TBD"           # hold-to-talk; must not collide with terminal/IDE bindings
+  push_to_talk_enhanced: "TBD"  # same, but forces enhance mode regardless of detect result
   cancel: "TBD"                 # abort without injecting
-  mechanism: "TBD"              # cgeventtap | carbon_hotkey — decide in Phase 1
-                                # carbon_hotkey cannot bind a bare modifier (fn/right-opt); tap can
 
 stt:
   backend: "TBD"                # mlx-whisper | whispercpp-metal | faster-whisper-cpu — from benchmark
                                 # NOT defaulted: CTranslate2 has no Metal backend, so the seeded
                                 # "faster-whisper unless beaten" default pre-judged the benchmark
   model: "TBD"                  # from benchmark — see stt.candidates
-  compute: "TBD"                # metal | ane | cpu — follows the winning backend
+  compute: "TBD"                # metal | ane | cpu — follows the winning backend. NOT pre-set to
+                                # metal: faster-whisper-cpu is still in the race and runs on CPU,
+                                # so pinning metal here would pre-judge the benchmark again.
   quantization: "TBD"           # backend-specific (q5_0, 4bit, int8, fp16) — from benchmark
-  language: "en"                # DECIDED: English-only for v1 MVP. Keeps all three candidates
-                                # eligible and drops the language-detection pass from the hot path.
+  language: "en"                # DECIDED: English-only for v1 MVP (Denis, 2026-09-14). Keeps all
+                                # three candidates eligible and drops the language-detection pass
+                                # from the hot path.
   vad: true
-  candidates:                   # the Phase 0 benchmark matrix; bench reads this, nothing hardcoded
+  keep_resident: true           # unified memory makes a warm model cheap; never reload per dictation
+  candidates:                   # the Phase 3 benchmark matrix; bench reads this, nothing hardcoded
     backends: ["mlx-whisper", "whispercpp-metal", "faster-whisper-cpu"]
     models: ["small.en", "medium.en", "large-v3-turbo"]
                                 # RESOLVED: language is "en", so the English-only models stay
@@ -53,40 +65,79 @@ stt:
 latency_budget_ms:              # acceptance criteria, not aspirations
   release_to_text_p50: 1200
   release_to_text_p95: 2500
+  detect_heuristic_max: 15      # the always-on path; must not be felt
+  enhance_total_max: 2500       # opt-in path only; budget above does not apply
 
 injection:
-  primary: "cgevent_unicode"    # CGEventKeyboardSetUnicodeString + CGEventPost — needs Accessibility
-  fallback: "clipboard_paste"   # set pasteboard + synthesize Cmd+V — ALSO needs Accessibility
-  last_resort: "clipboard_only" # no grant at all: set pasteboard + toast, Denis pastes. Never lose a prompt.
-  fallback_trigger: "TBD"       # char count and/or measured failure — decide in Phase 1
+  primary: "cgevent_unicode"    # CGEventKeyboardSetUnicodeString + CGEventPost — bypasses the keymap
+                                # entirely, which is what makes diacritics and symbols survive.
+                                # Needs Accessibility.
+  fallback: "pasteboard_paste"  # NSPasteboard write + synthetic Cmd+V — ALSO needs Accessibility
+  last_resort: "pasteboard_only" # no grant at all: set pasteboard + toast, Denis pastes.
+                                # Never lose a prompt.
+  fallback_trigger: "TBD"       # char count and/or measured failure — decide in Phase 4
   chunk_chars: "TBD"            # MEASURE: CGEventKeyboardSetUnicodeString drops/mangles long strings;
-                                # chunking is required, safe chunk size is a Phase 1 measurement
+                                # chunking is required, safe chunk size is a Phase 4 measurement
   inter_chunk_delay_ms: "TBD"   # MEASURE: too fast and the target app drops characters
-  restore_clipboard: true
+  restore_pasteboard: true
+  secure_input_check: true      # if another app has Secure Input enabled, injection silently
+                                # fails — detect it and fall back to pasteboard with a toast
 
 paths:
-  claude_projects_glob: "TBD"   # VERIFY on disk in Phase 2. Reference layout:
-                                # ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
+  claude_projects_glob: "~/.claude/projects/*/*.jsonl"
+                                # VERIFIED on disk 2026-09-15: 148 files, layout
+                                # ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl.
+                                # The scanner anchors at the root and walks it recursively,
+                                # so the documented subagent subdirectory would be picked up
+                                # without a config change. See docs/verified-schemas.md §1.
   claude_settings: "TBD"        # which settings file the hooks get registered in
   db: "~/Library/Application Support/Dict8/dict8.sqlite"
   logs: "~/Library/Logs/Dict8/"
+
+hooks:
+  user_prompt_submit: true      # the estimate's delivery slot — fires before Claude processes
+  post_tool_use: true           # live-meter ticks
+  session_end: true             # finalize the session row
+  fail_open: true               # a hook error never blocks the user's prompt
 
 usage_oracle:                   # cross-check tool — NOT a runtime dependency
   tool: "claude-tokens"         # https://pypi.org/project/claude-tokens/ — MIT, stdlib only
   version_pinned: "0.2.1"
   install: "uv tool install claude-tokens==0.2.1"
   tz_env: "Europe/Bucharest"    # its default is Asia/Shanghai — must be overridden or days misbucket
-  use: "Phase 2 reconciliation + periodic drift check. Never in the dictation path."
-  ignore: "its USD cost columns — Denis is on a subscription; the unit here is quota %, not dollars"
+  config_path: "~/Library/Application Support/claude-tokens/pricing.toml"  # macOS location
+  use: "Phase 1 reconciliation + periodic drift check. Never in the dictation path."
+  ignore: "its USD cost columns — subscription, not API billing; our unit is quota %"
 
-models:                         # user-editable; recommender may ONLY name entries from here
-  - { id: "TBD", label: "TBD", strength_line: "TBD" }
+detect:                         # is this dictation a prompt for Claude Code, or plain text?
+  mode: "heuristic_gates_classifier_resolves"
+  signals:                      # ordered by cost; the frontmost-app check is nearly free
+    - frontmost_app_is_claude_code   # NSWorkspace frontmost bundle id + AX window title
+    - transcript_length
+    - imperative_opening
+    - contains_identifier_or_path
+    - addresses_an_agent
+  uncertain_band: "TBD"         # heuristic scores inside this band escalate to the classifier
+  shadow_log_both: true         # Phase 5 logs heuristic AND classifier verdict on every
+                                # dictation, so the band can be tuned on real data
+  max_escalation_rate: 0.25     # if more than this share escalates, the heuristic is too weak
+
+enhance:
+  default: "TBD"                # onboarding choice: auto | manual | off
+  skip_buckets: ["quick-fix", "unknown"]
+  accept_required_when: ["questions_nonempty", "uncertain_terms_nonempty"]
+  model: "TBD"
+  timeout_ms: 1500              # exceeded → inject the raw transcript, toast the timeout
+  meter_as_line_item: true      # enhancement spends quota; it shows up in the meter
 
 classifier:
   buckets: ["quick-fix", "feature-build", "architecture", "debug"]
   model: "TBD"                  # exact model string for the one cheap call
   timeout_ms: 800               # exceeded => "no recommendation"; NEVER blocks the send
   on_error: "omit"
+
+models:                         # user-editable; recommender may ONLY name entries from here
+  - { id: "TBD", label: "TBD", strength_line: "TBD" }
 
 quota:
   source: "manual"              # no public API — user types weekly % after /usage
@@ -108,4 +159,9 @@ voice_commands:                 # matched post-transcription, exact-prefix, case
 privacy:
   audio_leaves_machine: false   # LOCKED
   telemetry: false              # LOCKED
-  store_transcripts: "TBD"      # yes/no + retention — changes the SQLite schema
+  store_transcripts: "features_only"
+                                # DECIDED (Denis, 2026-09-15): derived features only — length,
+                                # word count, files touched, bucket, model, tokens, wall time.
+                                # Raw prompt text is NEVER written to the DB. The estimator's
+                                # feature list needs no text, so this costs it nothing.
+  transcript_retention: null    # n/a while store_transcripts is features_only

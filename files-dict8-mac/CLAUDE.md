@@ -36,31 +36,25 @@ a usage-cost range, and a live spend meter. Wispr Flow is the reference for *fee
    Monitoring can each be missing, revoked by an OS update, or defeated by Secure Input in
    another app. Every one of those produces a visible toast naming the specific permission —
    never a silent no-op, which is how synthetic keystrokes fail on macOS by default.
-   Every dictation re-checks the grant; permission state is never cached as "granted once".
-   A missing grant degrades to pasteboard-only with a toast, never to a swallowed prompt.
 8. **Hooks fail open.** A Dict8 hook that errors, hangs, or finds no database lets the
    prompt through untouched and logs why. Dict8 sits in front of Denis's daily driver;
    it never becomes the reason a prompt didn't send.
 9. **Latency is the product.** Every commit keeps release→text within `latency_budget_ms`.
    `scripts/bench_latency.py` prints p50/p95 from the last 20 real dictations.
 
-## Stack (locked in ADR-001, do not revisit)
-Decision and rationale live in `docs/ADR-001-shell.md`. Summary: a single Python process —
-PyObjC for the menu-bar item, the non-activating overlay panel, `CGEventPost` injection and the
-`CGEventTap` hotkey; the STT model held warm in-process. No web shell, no sidecar, no native
-code to maintain. Shipped as a signed `.app` with a stable bundle ID, because the Accessibility
-grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-000-platform.md`.
+## Stack (locked in Phase 0, do not revisit)
+Decision and rationale live in `docs/ADR-001-shell.md`. Summary: <filled in Phase 0>.
 
 ## Third-party
 - `claude-tokens` (PyPI, MIT, pure stdlib) — a CLI that reads the same JSONL files and
   reports per-day/model/project token totals. It is a **reference implementation and a
-  reconciliation oracle only**. Read its parser; adopt its dedup rule; run it in the Phase 1
+  reconciliation oracle only**. Read its parser; adopt its dedup rule; run it in the Phase 2
   gate to check our numbers. Do NOT add it to the runtime path, do not import its pricing
   module, and set `CLAUDE_TOKENS_TZ` (its default timezone is Asia/Shanghai).
 
 ## Repo map
 - `dict8/audio/` — capture, VAD, ring buffer
-- `dict8/stt/` — STT backend wrapper, warm model held in memory
+- `dict8/stt/` — faster-whisper wrapper, warm model held in memory
 - `dict8/inject/` — CGEvent unicode path + pasteboard fallback + Secure Input detection
 - `dict8/permissions/` — TCC checks, onboarding requests, Settings deep links
 - `dict8/usage/` — JSONL tail-reader, dedup index, SQLite writer, backfill
@@ -69,16 +63,13 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
 - `dict8/ui/` — tray icon, overlay, toasts. Nothing else.
 - `prompts/` — classifier and enhancer prompts + their eval sets
 - `docs/verified-schemas.md` — observed JSONL + hook payload shapes
-- `docs/ADR-000-platform.md` — platform re-target (windows -> macos), supersedes the seeded locks
 - `docs/ADR-001-shell.md` — locked stack decision
-- `docs/ADR-002-hotkey.md` — locked hotkey mechanism (Phase 3, not yet written)
-- `bench/` — STT benchmark harness + its results table
+- `docs/ADR-002-hotkey.md` — locked hotkey mechanism
 
 ## Out of scope for v1 — do not build, do not scaffold "for later"
-Any OS but macOS, and any Mac that isn't Apple Silicon. Any tool but Claude Code.
-Non-English dictation (v1 is English-only; revisiting it changes the STT model choice).
-Other providers' quota routing (no local data exists to fit on). USD cost display. Any UI
-beyond tray icon + overlay + toast. Settings GUI — `config.yml` is the settings surface.
+Any OS but macOS, and any Mac that isn't Apple Silicon. Any tool but Claude Code. Other providers' quota routing (no local data
+exists to fit on). USD cost display. Any UI beyond tray icon + overlay + toast. Settings GUI —
+`config.yml` is the settings surface.
 
 ## Build order
 Usage layer ships first and headless (Phases 1–2: parser, estimator, `UserPromptSubmit`
@@ -88,13 +79,5 @@ then the live meter (6). MCP was considered and rejected: an MCP tool runs insid
 model's turn, which is after the tokens are committed — the wrong side of the decision.
 
 ## Phase state
-Current phase: **1** (usage core) — gate run 2026-09-15, **8/8 passing**, awaiting Denis's
-approval. Phase 2 has not been started. Re-run with `uv run scripts/gate_phase1.py`.
-Phases are sequential and gated. Do not start phase N+1 until the phase N gate has been
-run and its output approved by Denis.
-
-Out-of-order work already banked, from before the phases were renumbered (see git history):
-- **Phase 3 partial.** `docs/ADR-001-shell.md` written and LOCKED. `docs/ADR-002-hotkey.md`
-  NOT written. `bench/stt_bench.py` harness built but **never run** — it needs real speech on
-  this box, so `stt.*`, `hardware.mic_device` stay TBD and the Phase 3 gate is open.
-  Phase 3 is not done and does not count as done.
+Current phase: <N>. Phases are sequential and gated. Do not start phase N+1 until the
+phase N gate has been run and its output approved by Denis.

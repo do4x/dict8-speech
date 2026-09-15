@@ -1,0 +1,42 @@
+# Ship gate: all 8 pass. These test the failure mode that matters — silent invention
+# and dropped constraints — not output prettiness.
+- name: constraint survives
+  in: "add the qr check in endpoint but don't touch the auth middleware at all"
+  bucket: feature-build
+  expect_contains: ["auth middleware"]
+  expect_constraint_promoted: true
+
+- name: no invented acceptance criteria
+  in: "add a dark mode toggle to settings"
+  bucket: feature-build
+  expect_absent: ["test", "accessibility", "WCAG", "responsive"]
+
+- name: identifier copied verbatim
+  in: "rename get_user_data to fetchUserProfile in the members module"
+  bucket: quick-fix
+  expect_contains: ["get_user_data", "fetchUserProfile"]
+
+- name: quick-fix passes through
+  in: "uh bump the padding on the hero to twenty four"
+  bucket: quick-fix
+  expect_changes_empty: true
+
+- name: mangled identifier flagged not fixed
+  in: "the sin tricks dot ro deploy is failing"
+  bucket: debug
+  expect_uncertain_terms_nonempty: true
+
+- name: debug gets diagnose-first
+  in: "the meter shows double tokens after i resume a session"
+  bucket: debug
+  expect_contains: ["diagnos"]
+
+- name: no second question
+  in: "move booking state to a service layer i think, not sure about the demo timing"
+  bucket: architecture
+  expect_max_questions: 1
+
+- name: unknown passes through
+  in: "wait no hold on"
+  bucket: unknown
+  expect_changes_empty: true

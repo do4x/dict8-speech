@@ -1,0 +1,57 @@
+# bench/scripts.yml — the words to read aloud for each Phase 0 clip.
+# Bench-only data, same rule as model_ids.yml: model/clip constants do not live in code.
+#
+# WHY A FIXED SCRIPT: the Phase 0 comparison includes two microphones. If each mic
+# records different words, the WER gap measures the sentence, not the mic. Both sets
+# read exactly this, so the only variable left is the input device.
+#
+# `reference: true` means the text is also written to <clip>.txt and scored against.
+# Timing clips are not scored — only their duration matters — so they have no reference.
+
+3s:
+  seconds: 3
+  reference: false
+  text: >-
+    Add a retry with exponential backoff to the client.
+
+10s:
+  seconds: 10
+  reference: false
+  text: >-
+    Open the tail reader and make it dedupe by message id before it writes to
+    SQLite, then show me the row count it produced for today.
+
+30s:
+  seconds: 30
+  reference: false
+  text: >-
+    I want to rework how the overlay reports state. Right now it only shows the
+    transcript, but it should also show the recommendation chip and the estimate
+    range, and it needs to stay out of the way when there is nothing to report.
+    Make the panel non activating so it never steals focus from the terminal,
+    give it a floating window level, and make sure it ignores mouse events
+    entirely. If the classifier times out, just leave the chip off.
+
+coding_prompt:
+  seconds: 20
+  reference: true
+  # The point of this clip is whether identifiers survive as identifiers:
+  # get_user_data must not come back as "get user data".
+  text: >-
+    Rename get_user_data to fetch_user_profile everywhere in the usage module,
+    then wrap the return value in curly braces and quote the label argument.
+    After that, add a unit test that asserts parse_jsonl dedupes by message dot
+    id, and run pytest with dash k dedupe to check it passes before you commit
+    anything.
+
+unicode:
+  seconds: 15
+  reference: true
+  # English speech that RENDERS as non-ASCII. The accented loanwords are decided by
+  # what is said, so they are a fair test. Straight vs curly apostrophes are a model
+  # rendering choice, not a fidelity failure, so the reference uses straight ones and
+  # non_ascii_survived() only ends up checking the accents that speech actually determines.
+  text: >-
+    She said don't do it, it's a café not a résumé workshop. That's a naïve
+    reading of the façade, and frankly it's passé. My fiancée ordered the
+    jalapeño plate and regretted it within about twenty minutes.

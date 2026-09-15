@@ -1,0 +1,130 @@
+# config.yml — Dict8
+# The ONLY source of truth for paths, keys, models, thresholds.
+# RULE: null / "TBD" is never invented, never defaulted. Code reads config;
+# code does not hardcode. A visible gap beats a plausible guess.
+
+meta:
+  app: "Dict8"
+  version: "v1-mvp"
+  platform: "macos"             # LOCKED — Apple Silicon. Any other OS is out of scope.
+  target_tool: "claude-code"    # LOCKED — any other AI tool is out of scope
+
+hardware:
+  chip: "TBD"                   # M-series model + core counts — `sysctl -n machdep.cpu.brand_string`
+  unified_memory_gb: "TBD"      # decides how large a whisper model can stay resident
+  os_version: "TBD"             # `sw_vers` — TCC and Core ML behavior differ across releases
+  mic_device: "TBD"             # exact device name; never assume "default"
+
+permissions:                    # TCC. All three are requested in onboarding and re-checked at launch.
+  microphone: required
+  accessibility: required       # keystroke injection into the focused app
+  input_monitoring: required    # global hold-to-talk hotkey
+  note: "an unsigned binary loses its TCC grants when rebuilt — use a stable signing identity
+         in dev or the permission dialogs reappear on every build"
+  on_revoked: "toast with a deep link to the right Settings pane; never fail silently"
+
+hotkey:
+  mechanism: "TBD"              # CGEventTap (needs Input Monitoring, clean key-up) vs
+                                # RegisterEventHotKey (no permission, awkward for hold) — decide in Phase 3
+  push_to_talk: "TBD"           # hold-to-talk; must not collide with terminal/IDE bindings
+  push_to_talk_enhanced: "TBD"  # same, but forces enhance mode regardless of detect result
+  cancel: "TBD"
+
+stt:
+  backend: "TBD"                # Phase 3 benchmark: whisper.cpp + Core ML encoder vs
+                                # mlx-whisper vs faster-whisper on CPU (CTranslate2, no CUDA here)
+  model: "TBD"                  # small.en | medium.en | large-v3-turbo — from benchmark
+  device: "metal"
+  compute_type: "TBD"
+  language: "TBD"               # en | ro | auto — drives the unicode injection path
+  vad: true
+  keep_resident: true           # unified memory makes a warm model cheap; never reload per dictation
+
+latency_budget_ms:              # acceptance criteria, not aspirations
+  release_to_text_p50: 1200
+  release_to_text_p95: 2500
+  detect_heuristic_max: 15      # the always-on path; must not be felt
+  enhance_total_max: 2500       # opt-in path only; budget above does not apply
+
+injection:
+  primary: "cgevent_unicode"    # CGEventKeyboardSetUnicodeString — bypasses keymap entirely,
+                                # which is what makes diacritics and symbols survive
+  fallback: "pasteboard_paste"  # NSPasteboard write + synthetic Cmd+V
+  fallback_trigger: "TBD"       # char count and/or measured failure — decide in Phase 4
+  restore_pasteboard: true
+  secure_input_check: true      # if another app has Secure Input enabled, injection silently
+                                # fails — detect it and fall back to pasteboard with a toast
+
+paths:
+  claude_projects_glob: "TBD"   # VERIFY on disk in Phase 1. Reference layout:
+                                # ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
+  claude_settings: "TBD"        # which settings file the hooks get registered in
+  db: "~/Library/Application Support/Dict8/dict8.sqlite"
+  logs: "~/Library/Logs/Dict8/"
+
+hooks:
+  user_prompt_submit: true      # the estimate's delivery slot — fires before Claude processes
+  post_tool_use: true           # live-meter ticks
+  session_end: true             # finalize the session row
+  fail_open: true               # a hook error never blocks the user's prompt
+
+usage_oracle:                   # cross-check tool — NOT a runtime dependency
+  tool: "claude-tokens"         # https://pypi.org/project/claude-tokens/ — MIT, stdlib only
+  version_pinned: "0.2.1"
+  install: "uv tool install claude-tokens==0.2.1"
+  tz_env: "Europe/Bucharest"    # its default is Asia/Shanghai — override or days misbucket
+  config_path: "~/Library/Application Support/claude-tokens/pricing.toml"  # macOS location
+  use: "Phase 1 reconciliation + periodic drift check. Never in the dictation path."
+  ignore: "its USD cost columns — subscription, not API billing; our unit is quota %"
+
+detect:                         # is this dictation a prompt for Claude Code, or plain text?
+  mode: "heuristic_gates_classifier_resolves"
+  signals:                      # ordered by cost; the frontmost-app check is nearly free
+    - frontmost_app_is_claude_code   # NSWorkspace frontmost bundle id + AX window title
+    - transcript_length
+    - imperative_opening
+    - contains_identifier_or_path
+    - addresses_an_agent
+  uncertain_band: "TBD"         # heuristic scores inside this band escalate to the classifier
+  shadow_log_both: true         # Phase 5 logs heuristic AND classifier verdict on every
+                                # dictation, so the band can be tuned on real data
+  max_escalation_rate: 0.25     # if more than this share escalates, the heuristic is too weak
+
+enhance:
+  default: "TBD"                # onboarding choice: auto | manual | off
+  skip_buckets: ["quick-fix", "unknown"]
+  accept_required_when: ["questions_nonempty", "uncertain_terms_nonempty"]
+  model: "TBD"
+  timeout_ms: 1500              # exceeded → inject the raw transcript, toast the timeout
+  meter_as_line_item: true      # enhancement spends quota; it shows up in the meter
+
+classifier:
+  buckets: ["quick-fix", "feature-build", "architecture", "debug"]
+  model: "TBD"
+  timeout_ms: 800               # exceeded => "no recommendation"; NEVER blocks the send
+  on_error: "omit"
+
+models:                         # user-editable; recommender may ONLY name entries from here
+  - { id: "TBD", label: "TBD", strength_line: "TBD" }
+
+quota:
+  source: "manual"              # no public API — user types weekly % after /usage
+  checkin_cadence: "TBD"
+  last_reading: null
+  stale_after_hours: "TBD"
+
+estimate:
+  method: "heuristic"
+  output: "range"               # never a point estimate
+  min_samples_for_regression: 200
+  refuse_when_out_of_distribution: true
+
+voice_commands:                 # matched post-transcription, exact-prefix, case-insensitive
+  send: ["send"]
+  override_model: ["use opus", "use sonnet", "use haiku"]
+  cancel: ["cancel", "scratch that"]
+
+privacy:
+  audio_leaves_machine: false   # LOCKED
+  telemetry: false              # LOCKED
+  store_transcripts: "TBD"      # yes/no + retention — changes the SQLite schema

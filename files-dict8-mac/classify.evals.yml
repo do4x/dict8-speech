@@ -1,0 +1,13 @@
+# Ship gate: >=10/12 correct. Run before Phase 3 is declared done and after any prompt edit.
+- { in: "add a dark mode toggle to the settings page and persist it", expect: feature-build }
+- { in: "bump the padding on the hero section it's too tight on mobile", expect: quick-fix }
+- { in: "why is the no-show penalty firing twice for the same booking", expect: debug }
+- { in: "i think we need to split the gym and clinic logic into separate packages", expect: architecture }
+- { in: "fix the typo in the romanian copy on the hours section", expect: quick-fix }
+- { in: "build the manual quota entry flow with the tray action and sqlite write", expect: feature-build }
+- { in: "tests pass locally but CI fails on the migration step and i can't see why", expect: debug }
+- { in: "evaluate whether we move logging from sqlite to postgres before more clients", expect: architecture }
+- { in: "um so like the thing with the the recording", expect: unknown }
+- { in: "wire the reviews endpoint to the fixture for now", expect: feature-build }
+- { in: "it's slow but i don't know if it's whisper or the injection", expect: debug }
+- { in: "use opus", expect: unknown }   # voice command leaked past the stripper — must not classify
