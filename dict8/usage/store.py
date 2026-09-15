@@ -28,7 +28,7 @@ from typing import Iterable, Iterator
 
 from dict8.usage.parser import AssistantMessage, Turn
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS turns (
     prompt_chars          INTEGER NOT NULL,       -- summed over every prompt in the turn
     prompt_words          INTEGER NOT NULL,       -- summed over every prompt in the turn
     prompt_count          INTEGER NOT NULL DEFAULT 1,
-    task_type             TEXT,                   -- null until Phase 5 fills it
+    task_type             TEXT,                   -- classifier bucket, or null if unclassified
+    task_type_confidence  REAL,                   -- classifier's own confidence, 0-1
+    task_type_source      TEXT,                   -- classifier.model that produced it
     -- derived by refresh_turn_aggregates(), never written directly:
     files_touched         INTEGER NOT NULL DEFAULT 0,
     model                 TEXT,
@@ -93,12 +95,18 @@ CREATE INDEX IF NOT EXISTS idx_turns_ts      ON turns(ts);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 
 -- Every human prompt that fed a turn. Queued messages mean a turn can have several;
--- turns.prompt_uuid is the first of them (docs/verified-schemas.md §6).
+-- turns.prompt_uuid is the first of them (docs/verified-schemas.md §6). src_file/src_line
+-- + seq (this prompt's order within the turn) let a classifier re-locate and reassemble
+-- the real text on disk WITHOUT it ever being persisted here — see
+-- dict8.usage.parser.read_prompt_text. No text column exists on this table, on purpose.
 CREATE TABLE IF NOT EXISTS turn_prompts (
     prompt_uuid TEXT PRIMARY KEY,
     turn_uuid   TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
     chars       INTEGER NOT NULL,
-    words       INTEGER NOT NULL
+    words       INTEGER NOT NULL,
+    src_file    TEXT NOT NULL,
+    src_line    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_prompts_turn ON turn_prompts(turn_uuid);
 
@@ -183,12 +191,32 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(DDL)
+        self._migrate()
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(SCHEMA_VERSION),),
         )
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive column migrations. DDL above is CREATE-IF-NOT-EXISTS, which never
+        adds a column to a table that already exists from an older schema version — this
+        covers that case for anyone who ran the Phase 1 schema (v2) before v3 added the
+        classifier columns.
+        """
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(turns)")}
+        if "task_type_confidence" not in cols:
+            self.conn.execute("ALTER TABLE turns ADD COLUMN task_type_confidence REAL")
+        if "task_type_source" not in cols:
+            self.conn.execute("ALTER TABLE turns ADD COLUMN task_type_source TEXT")
+        pcols = {r[1] for r in self.conn.execute("PRAGMA table_info(turn_prompts)")}
+        if "seq" not in pcols:
+            self.conn.execute("ALTER TABLE turn_prompts ADD COLUMN seq INTEGER NOT NULL DEFAULT 0")
+        if "src_file" not in pcols:
+            self.conn.execute("ALTER TABLE turn_prompts ADD COLUMN src_file TEXT NOT NULL DEFAULT ''")
+        if "src_line" not in pcols:
+            self.conn.execute("ALTER TABLE turn_prompts ADD COLUMN src_line INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -278,7 +306,8 @@ class Store:
             for t in turns
         ]
         prompt_rows = [
-            (p.uuid, t.prompt.uuid, p.chars, p.words) for t in turns for p in t.prompts
+            (p.uuid, t.prompt.uuid, seq, p.chars, p.words, p.src_file, p.src_line)
+            for t in turns for seq, p in enumerate(t.prompts)
         ]
         link_rows = [(mid, t.prompt.uuid) for t in turns for mid in t.message_ids]
         with self.tx() as conn:
@@ -301,9 +330,11 @@ class Store:
             )
             if prompt_rows:
                 conn.executemany(
-                    "INSERT INTO turn_prompts(prompt_uuid, turn_uuid, chars, words) "
-                    "VALUES (?,?,?,?) ON CONFLICT(prompt_uuid) DO UPDATE SET "
-                    "turn_uuid=excluded.turn_uuid, chars=excluded.chars, words=excluded.words",
+                    "INSERT INTO turn_prompts(prompt_uuid, turn_uuid, seq, chars, words, "
+                    "src_file, src_line) VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(prompt_uuid) DO UPDATE SET "
+                    "turn_uuid=excluded.turn_uuid, seq=excluded.seq, chars=excluded.chars, "
+                    "words=excluded.words, src_file=excluded.src_file, src_line=excluded.src_line",
                     prompt_rows,
                 )
             if link_rows:
@@ -332,6 +363,33 @@ class Store:
                 cur = conn.execute(LINK_SQL, (m.message_id, row["prompt_uuid"]))
                 linked += cur.rowcount
         return linked
+
+    def set_task_type(self, prompt_uuid: str, bucket: str, confidence: float, source: str) -> None:
+        with self.tx() as conn:
+            conn.execute(
+                "UPDATE turns SET task_type=?, task_type_confidence=?, task_type_source=? "
+                "WHERE prompt_uuid=?",
+                (bucket, confidence, source, prompt_uuid),
+            )
+
+    def unclassified_turns(self):
+        """(turn row, [ordered (src_file, src_line) for each of its prompts]) for every
+        turn with no task_type yet, oldest first. Callers re-read the prompt text
+        transiently from disk (dict8.usage.parser.read_prompt_text) — it is never
+        persisted here.
+        """
+        turns = self.conn.execute(
+            "SELECT prompt_uuid, session_id, ts, prompt_count, message_count "
+            "FROM turns WHERE task_type IS NULL ORDER BY ts"
+        ).fetchall()
+        out = []
+        for t in turns:
+            locs = self.conn.execute(
+                "SELECT src_file, src_line FROM turn_prompts "
+                "WHERE turn_uuid = ? ORDER BY seq", (t["prompt_uuid"],)
+            ).fetchall()
+            out.append((t, [(r["src_file"], r["src_line"]) for r in locs]))
+        return out
 
     def refresh_turn_aggregates(self) -> None:
         with self.tx() as conn:

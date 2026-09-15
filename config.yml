@@ -132,7 +132,19 @@ enhance:
 
 classifier:
   buckets: ["quick-fix", "feature-build", "architecture", "debug"]
-  model: "TBD"                  # exact model string for the one cheap call
+  backend: "mlx-lm"             # DECIDED (Denis, 2026-09-15): local, not a cloud API call —
+                                # detection can hand this text that was never meant for
+                                # Claude Code at all, and invariant 7 is local-only.
+  model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+                                # MEASURED on this machine (Apple M5) against
+                                # prompts/classify.evals.yml: 12/12 (gate is >=10/12),
+                                # warm latency 668-794ms. Real turns: 55/68 backfilled
+                                # within budget at 599-792ms, 13 legitimately over (>500
+                                # words). See dict8/advise/classifier.py docstring — the
+                                # margin against timeout_ms below is real but thin; the
+                                # client enforces the timeout itself and kills+replaces
+                                # its worker on overrun rather than trusting the model to
+                                # stay under it.
   timeout_ms: 800               # exceeded => "no recommendation"; NEVER blocks the send
   on_error: "omit"
 

@@ -1,5 +1,15 @@
 # CLAUDE.md — Dict8
 
+## Response length
+- Artifacts (prompts, CLAUDE.md, configs, code) go to files and get presented,
+  not pasted inline. Inline only if under ~20 lines.
+- Prose around an artifact: 6 lines max — what changed, what's assumed, what's blocked.
+- Exploratory messages ("idea: X", "what about Y", "is Z useful") get an answer,
+  not a package: verdict, the one thing that breaks it, what you'd need to proceed.
+  Under 10 lines. Build the artifact only when asked to.
+- Nothing unsolicited: no bonus sections, no pre-empting the next three questions.
+- Stop when the question is answered. Length is not thoroughness.
+
 ## What Dict8 is
 Push-to-talk dictation for Claude Code on macOS (Apple Silicon). Hold hotkey → speak → release →
 transcript lands in the frontmost app. Layered on top: a model recommendation,
@@ -57,6 +67,12 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
   reconciliation oracle only**. Read its parser; adopt its dedup rule; run it in the Phase 1
   gate to check our numbers. Do NOT add it to the runtime path, do not import its pricing
   module, and set `CLAUDE_TOKENS_TZ` (its default timezone is Asia/Shanghai).
+- `mlx-lm` (PyPI, Apple Silicon only) — **runtime dependency**, unlike everything else
+  here. Runs `classifier.model` locally, in a resident subprocess (mirrors
+  `stt.keep_resident`). Chosen over a cloud classifier call (Denis, 2026-09-15): invariant
+  7 is local-only, and detection can hand the classifier text that was never meant for
+  Claude Code at all — a cloud call would upload that regardless. See
+  `dict8/advise/classifier.py`.
 
 ## Repo map
 - `dict8/audio/` — capture, VAD, ring buffer
@@ -98,3 +114,11 @@ Out-of-order work already banked, from before the phases were renumbered (see gi
   NOT written. `bench/stt_bench.py` harness built but **never run** — it needs real speech on
   this box, so `stt.*`, `hardware.mic_device` stay TBD and the Phase 3 gate is open.
   Phase 3 is not done and does not count as done.
+- **Phase 5's classifier pulled forward** (Denis, 2026-09-15): Phase 2's estimator needs a
+  real feature to fit on — prompt length measured r=-0.021 against tokens on this corpus,
+  essentially zero. `prompts/classify.md` runs locally via `dict8/advise/classifier.py`
+  (`mlx-lm`, see Third-party), gate 12/12, backfilled onto 68 real turns via
+  `dict8 classify-backfill` (55 classified, 13 legitimately over the latency budget).
+  Bucket medians show real separation (unknown 643K -> quick-fix 894K -> debug 2.5M ->
+  feature-build 6.4M tokens) — small n, but a usable Phase 2 feature where word count
+  wasn't. Detection and enhancement (the rest of Phase 5) are NOT built.

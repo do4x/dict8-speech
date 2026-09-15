@@ -177,8 +177,45 @@ A user line is a **human prompt** iff its content is a `str`, or a list containi
 `text` block and no `tool_result` block. A `tool_result`-bearing line is the harness returning
 output, not a person typing — counting those as prompts inflates the turn count several-fold.
 
+**CORRECTION (2026-09-15), found while building the Phase 5 classifier.** The rule above
+is necessary but not sufficient — verified wrong against this corpus's own `turns` table,
+which came back with entries of 14,000+ `prompt_words`. The text behind them was
+harness-injected content sitting on a user-role line with a `str` or bare-`text` content
+shape identical to a real prompt: `<ide_selection>...</ide_selection>`,
+`<local-command-caveat>...</local-command-caveat>` (the wrapper on every slash command —
+143 occurrences in this corpus), `<command-name>`/`<command-message>`/`<command-args>`,
+`<task-notification>`, `<system-reminder>`, `[Image: ...]` attachment captions, and a
+Skill's full loaded instructions opening with the literal string `"Base directory for
+this skill:"` (one instance alone was 108,386 characters — bigger than this machine's
+entire real prompt history combined).
+
+`isMeta: True` looked like the obvious flag for "not really the user" and measured
+**wrong**: it also appears on a genuine, deliberately composed 15,681-word human prompt in
+this corpus, and is absent on some of the synthetic lines above (older Claude Code
+versions predate the field entirely — present on only 176 of 1,910 user lines checked).
+Blanket-filtering on it would silently have dropped a real prompt from the data while
+missing several synthetic ones. Content-based stripping is what's verified to work:
+regex-remove any well-formed `<tag>...</tag>` block (generic over the tag name — every
+one observed here is well-formed, and a tag Claude Code adds in a future version is still
+caught) and any `[Image: ...]` placeholder, then treat the *residual* text as the prompt.
+A line starting with the Skill-preamble prefix has zero residual in 100% of instances
+checked, so it's dropped outright rather than parsed for a trailing few words that were
+never observed to exist. Implemented in `dict8.usage.parser._strip_synthetic()`; the
+result changed the corpus from 234 "turns" to 68 genuine ones. Effect on this document's
+other findings: **none** — dedup, token totals, and reconciliation (§4, §5) are computed
+from `assistant` lines and untouched by anything on a `user` line.
+
+Known remaining gap, accepted rather than chased further: a small number of other
+system-authored lines (a hook-activation notice, a scheduled goal check-in) carry none of
+the markers above and still pass through as "human". Single-digit occurrences in this
+corpus — worth revisiting if it shows up materially in the classifier's bucket
+distribution, not worth an open-ended pattern blocklist today.
+
 A **turn** = one human prompt plus every assistant line that follows it, within the same
-`sessionId`, until the next human prompt.
+`sessionId`, until the next human prompt. A run of human prompts with no assistant reply
+between them (queued dictation, or one prompt interrupting another) folds into **one**
+turn — Claude answers them together, so crediting the tokens to only the last prompt
+attributes a merged turn's full cost to whichever line happened to close it.
 
 ## 7. Files touched
 

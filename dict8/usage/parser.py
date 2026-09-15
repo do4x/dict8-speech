@@ -16,6 +16,7 @@ Two things are deliberately structural rather than conventional:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,14 +208,63 @@ def _tool_use_paths(content: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found))
 
 
+_SYNTHETIC_TAG_RE = re.compile(r"<([a-zA-Z][a-zA-Z_-]*)>.*?</\1>", re.DOTALL)
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[Image:[^\]]*\]")
+_SKILL_PREAMBLE_PREFIX = "Base directory for this skill:"
+
+
+def _strip_synthetic(text: str) -> str:
+    """Remove harness-injected content so word/char counts and the classifier see only
+    what a person actually said — CORRECTION to the original §6 characterization.
+
+    §6 as first written treated "a string, or a list with a text block and no tool_result
+    block" as sufficient for "human prompt". Verified wrong on 2026-09-15 against this
+    corpus's `turns` table: several "turns" came back with 14,000+ prompt_words, and the
+    text behind them was `<ide_selection>...`, `<local-command-caveat>...`, and Skill
+    preambles opening with "Base directory for this skill:" — harness-injected context on
+    a user-role line, not anything typed or dictated. One of those alone (a Skill's full
+    instructions) is bigger than this session's entire real prompt history combined, and
+    it was silently becoming the single most "expensive-looking" row in the estimator's
+    training data.
+
+    `isMeta: True` looked like the obvious flag for this and is NOT: measured on this
+    corpus, a 15,681-word line that is a genuine, deliberately composed human prompt also
+    carries `isMeta: True`, alongside `[Image: ...]` attachment captions, Skill preambles,
+    and local-command boilerplate. Blanket-filtering on it would have silently dropped a
+    real prompt from the data instead of an synthetic one — worse, since it fails quietly.
+    Content-based stripping is what's actually verified to work: every `<tag>...</tag>`
+    block observed here (`system-reminder`, `ide_selection`, `ide_opened_file`,
+    `local-command-caveat`, `command-name`, `command-message`, `command-args`,
+    `local-command-stdout`, `task-notification`, ...) is well-formed and safe to strip
+    generically without a hardcoded tag list — a tag Claude Code adds later is still
+    caught. `[Image: ...]` placeholders and the Skill-preamble prefix are separate,
+    verified patterns: every observed Skill-preamble line was 100% synthetic (0 residual
+    words once stripped), so a line starting with that exact prefix is dropped entirely.
+
+    Known remaining gap, accepted rather than chased further: a handful of other
+    system-authored lines (a hook-activation notice, a scheduled goal check-in) carry
+    none of these markers and pass through as "human". Rare in this corpus (a small
+    handful of ~1,900 user lines) — worth revisiting if it shows up in the bucket
+    distribution, not worth an ever-growing pattern blocklist today.
+    """
+    text = _SYNTHETIC_TAG_RE.sub("", text)
+    text = _IMAGE_PLACEHOLDER_RE.sub("", text)
+    stripped = text.strip()
+    if stripped.startswith(_SKILL_PREAMBLE_PREFIX):
+        return ""
+    return stripped
+
+
 def is_human_prompt(content: Any) -> bool:
-    """§6: a string, or a list with a text block and no tool_result block.
+    """§6: a string, or a list with a text block and no tool_result block — AND what's
+    left after `_strip_synthetic` is non-empty. See that function for why the stripping
+    step is load-bearing, not cosmetic.
 
     A tool_result-bearing line is the harness returning output, not a person typing.
     Counting those as prompts inflates the turn count several-fold.
     """
     if isinstance(content, str):
-        return bool(content.strip())
+        return bool(_strip_synthetic(content))
     if not isinstance(content, list):
         return False
     has_text = False
@@ -224,21 +274,22 @@ def is_human_prompt(content: Any) -> bool:
         btype = block.get("type")
         if btype == "tool_result":
             return False
-        if btype == "text" and str(block.get("text") or "").strip():
+        if btype == "text" and _strip_synthetic(str(block.get("text") or "")):
             has_text = True
     return has_text
 
 
 def _prompt_text(content: Any) -> str:
-    """Join the spoken/typed text of a prompt. Used for length only, never persisted."""
+    """Join the spoken/typed text of a prompt, synthetic wrapper content stripped
+    (see `_strip_synthetic`). Used for length only, never persisted."""
     if isinstance(content, str):
-        return content
+        return _strip_synthetic(content)
     parts = [
-        str(b.get("text") or "")
+        _strip_synthetic(str(b.get("text") or ""))
         for b in content
         if isinstance(b, dict) and b.get("type") == "text"
     ]
-    return "\n".join(parts)
+    return "\n".join(p for p in parts if p)
 
 
 def parse_line(
@@ -327,6 +378,37 @@ def parse_line(
         src_line=line_no,
     )
     # `text` goes out of scope here and is never returned: features_only, structurally.
+
+
+def read_prompt_text(path: Path, line_no: int) -> str | None:
+    """Re-read one human prompt's text directly from the source JSONL, by line number.
+
+    For a TRANSIENT purpose only — feeding a classifier — never for persistence.
+    `privacy.store_transcripts: features_only` means Dict8's own store carries no text
+    column anywhere (see dict8.usage.store), so a caller that needs the actual words goes
+    back to Claude Code's own on-disk transcript, which already exists independent of
+    Dict8. Returns None if the line no longer looks like a human prompt (file rewritten,
+    line renumbered since the turn was recorded).
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh, 1):
+                if i != line_no:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(d, dict):
+                    return None
+                msg = d.get("message")
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if not is_human_prompt(content):
+                    return None
+                return _prompt_text(content)
+    except OSError:
+        return None
+    return None
 
 
 def parse_file(path: Path, root: Path, *, start_offset: int = 0) -> Iterator[tuple[Any, int]]:

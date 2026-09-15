@@ -3,7 +3,10 @@ name = "dict8"
 version = "0.1.0"
 description = "Push-to-talk dictation in front of Claude Code, with a usage layer underneath."
 requires-python = ">=3.11"
-dependencies = ["pyyaml>=6"]
+dependencies = [
+    "pyyaml>=6",
+    "mlx-lm>=0.28 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [project.scripts]
 dict8 = "dict8.cli:main"

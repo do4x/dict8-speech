@@ -1,4 +1,5 @@
 """`dict8` command line — Phase 1 surface: backfill, usage, tail, reconcile.
+Plus the classifier (prompts/classify.md), pulled forward from Phase 5 (Denis, 2026-09-15).
 
 Invariant 6: no USD figure is printed by any command. `claude-tokens` emits a
 `cost_usd_estimate` field; `reconcile` reads its token columns and drops that one on the
@@ -18,6 +19,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dict8 import config as config_mod
+from dict8.usage.parser import read_prompt_text
 from dict8.usage.reader import scan
 from dict8.usage.store import TOKEN_COLUMNS, Store
 
@@ -239,6 +241,61 @@ def cmd_reconcile(args, cfg) -> int:
     return 0 if ok else 1
 
 
+def cmd_classify_backfill(args, cfg) -> int:
+    """Classify every turn with no task_type yet.
+
+    Reads prompt text transiently from Claude Code's own on-disk transcripts (never from
+    Dict8's store, which has no text column) and writes back only the resulting bucket —
+    see dict8.usage.parser.read_prompt_text and dict8.advise.classifier.
+    """
+    from dict8.advise.classifier import Classifier
+
+    with _open_store(cfg) as store:
+        work = store.unclassified_turns()
+        if args.limit:
+            work = work[: args.limit]
+        if not work:
+            print("nothing to classify")
+            return 0
+
+        print(f"loading {cfg.get('classifier.model')} …")
+        clf = Classifier(cfg)
+        t_load0 = time.monotonic()
+        clf.warm()  # pay the model-load cost once, up front, not on turn 1
+        print(f"loaded in {time.monotonic() - t_load0:.1f}s\n")
+
+        counts: dict[str, int] = {}
+        omitted = 0
+        latencies = []
+        for i, (turn, locs) in enumerate(work, 1):
+            parts = [read_prompt_text(Path(f), n) for f, n in locs]
+            text = "\n".join(p for p in parts if p)
+            if not text.strip():
+                omitted += 1
+                continue
+            result = clf.classify(text)
+            if result is None:
+                omitted += 1
+                continue
+            store.set_task_type(turn["prompt_uuid"], result.bucket, result.confidence, clf.model_id)
+            counts[result.bucket] = counts.get(result.bucket, 0) + 1
+            latencies.append(result.latency_ms)
+            if i % 25 == 0 or i == len(work):
+                print(f"  {i}/{len(work)}")
+        clf.close()
+
+    print(f"\nclassified : {sum(counts.values())}")
+    print(f"omitted    : {omitted}  (empty text, timeout, or parse failure — fail-open)")
+    for bucket, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {bucket:<14} {n}")
+    if latencies:
+        latencies.sort()
+        print(f"\nlatency: min={latencies[0]:.0f}ms median={latencies[len(latencies)//2]:.0f}ms "
+              f"max={latencies[-1]:.0f}ms  (budget: classifier.timeout_ms="
+              f"{cfg.get('classifier.timeout_ms')}ms)")
+    return 0
+
+
 # ---- entry point ----------------------------------------------------------------
 
 
@@ -268,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--include-today", action="store_true",
                    help="include the still-being-written current day (expect drift)")
     r.set_defaults(func=cmd_reconcile)
+
+    cb = sub.add_parser("classify-backfill", help="fill task_type on unclassified turns")
+    cb.add_argument("--limit", type=int, help="classify at most N turns (oldest first)")
+    cb.set_defaults(func=cmd_classify_backfill)
 
     args = p.parse_args(argv)
     cfg = config_mod.load(args.config)
