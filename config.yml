@@ -159,10 +159,95 @@ quota:
   stale_after_hours: "TBD"      # past this, show staleness instead of a burn-rate warning
 
 estimate:
-  method: "heuristic"           # until backfill + fit beats it on held-out data
+  # Every number in this block is from ONE run: `uv run dict8 estimate --eval`,
+  # 2026-09-18, n=92 usable turns, leave-one-out. The DB grows while you work — the
+  # session you run in writes the transcripts the parser reads (HANDOFF §9) — so re-running
+  # --eval will not reproduce these digits exactly. The orderings and the plateaus are what
+  # is stable; the third significant figure is not. Re-run --eval before quoting any of it.
+  method: "quantile"            # bucket median + quantile band. Was "heuristic" through
+                                # Phase 0-1; `dict8.advise.estimator.METHODS` still accepts
+                                # that spelling so an older config keeps working, but the
+                                # name here is now the one the code and the reports print.
+                                # MEASURED, 25/75 band, n=92:
+                                #   quantile    MAPE 174.6%  MdAPE 73.8%  coverage 0.477  band 6.9x
+                                #   regression  MAPE 132.2%  MdAPE 67.6%  coverage 0.477  band 4.1x
+                                # Both refused the same 6 of 92 held-out turns, so the two
+                                # rows compare like for like.
+                                # THE REGRESSION WINS HELD-OUT: same coverage, but 42 points
+                                # less MAPE and a band 1.7x tighter for it. (Read that edge as
+                                # an upper bound — its band comes from in-sample residuals,
+                                # which flatters its coverage. See the estimator docstring.)
+                                # It is NOT shipped: n=92 is under min_samples_for_regression
+                                # below, and that floor is not negotiable on a score measured
+                                # on 92 points with 10-28 per bucket.
+                                # dict8.advise.estimator.select_method enforces it, so setting
+                                # method: "regression" today is refused with that message
+                                # rather than quietly shipping an unsupported fit — `dict8
+                                # estimate --eval` still prints its full table under such a
+                                # config, it just reports that nothing would ship.
+                                # Revisit when the backfill passes 200 turns: if the regression
+                                # still wins, switch this value to "regression" and re-run --eval.
   output: "range"               # never a point estimate
   min_samples_for_regression: 200
   refuse_when_out_of_distribution: true
+                                # false does NOT silence the check: the range still comes back
+                                # flagged ood with the reason attached, drawn from the pooled
+                                # distribution and labeled an extrapolation. It buys
+                                # EXTRAPOLATION, never FABRICATION — the two sample floors
+                                # below still hold, because no flag can conjure a band out of
+                                # a sample too small to have one.
+  interval_low_q: 0.25          # the central 50% band. MEASURED (band sweep, same run): of the
+  interval_high_q: 0.75         # three candidates this is both the best-calibrated and the only
+                                # usable width —
+                                #   25/75 : nominal 50%, held-out 0.477 (gap 2.3 pts), band 6.9x
+                                #   10/90 : nominal 80%, held-out 0.721 (gap 7.9 pts), band 47.1x
+                                #    5/95 : nominal 90%, held-out 0.849 (gap 5.1 pts), band 185.7x
+                                # A band 47x wide ("200K to 9M tokens") answers nothing, and the
+                                # wider bands also overstate their own coverage by more. The cost
+                                # is honest and stated in the output: half of real turns land
+                                # outside a 50% band.
+  min_samples_for_bucket: 10    # at/above this a bucket uses its own band; below it, the pooled
+                                # distribution over all turns. MEASURED (pooling sweep, same run;
+                                # only this knob moves, the refusal floor is pinned at 1):
+                                # floors 1-8 -> MdAPE 74.0 / coverage 0.459; floors 10-12 ->
+                                # 73.8 / 0.477; 15-20 -> 79.8 / 0.500; 29 (pool everything) ->
+                                # 85.2 / 0.484. 10 is the low end of the best plateau. Honest
+                                # reading: 1 vs 10 is noise (0.2 MdAPE points); what the sweep
+                                # really shows is that pooling EVERYTHING is clearly worse, i.e.
+                                # the buckets carry some signal. Today only feature-build (n=10)
+                                # sits near the line.
+  ood_min_bucket_samples: 5     # below this many past turns in the named bucket, no range at all.
+                                # DERIVED from the band above, not picked: a 25/75 band over n
+                                # points puts its low edge at index 0.25*(n-1), so for n<5 that
+                                # edge IS the bucket minimum and the "50% band" is really the
+                                # observed range wearing a quantile's name.
+                                # The refusal sweep in --eval (which moves ONLY this knob) shows
+                                # the data cannot distinguish any floor from 1 to 8 — all give
+                                # 86 scored / 6 refused, MdAPE 73.8, coverage 0.477 — because
+                                # bucket counts today are architecture=0, feature-build=10,
+                                # quick-fix=15, debug=15, unknown=28 and nothing lands between
+                                # 1 and 9. Re-measure if a bucket ever does.
+  ood_min_pooled_samples: 5     # the same floor on the POOLED group — every recorded turn,
+                                # whatever its bucket. This is the path that matters most: the
+                                # UserPromptSubmit hook has no bucket to pass (there is no model
+                                # call at submit time), so almost every real estimate is drawn
+                                # from the pooled group, and it was the ONE group with no floor
+                                # on it. A store holding a single turn answered
+                                # "1,000 - 1,000 tokens (median 1,000), central 50% band" —
+                                # a point estimate wearing a band's label, which estimate.output
+                                # above forbids. Caught in U2 verification, 2026-09-18.
+                                # DERIVED, same arithmetic as ood_min_bucket_samples: with a
+                                # 25/75 band the low edge sits at index 0.25*(n-1), so below n=5
+                                # both edges collapse onto the smallest and largest turn on
+                                # record. NOT measurable by leave-one-out: the pooled group is
+                                # always the whole store minus one, far above any floor worth
+                                # arguing about. The "pooled band vs n" table in --eval is the
+                                # only evidence there is, and it is honest about what this floor
+                                # does and does not buy: hi/lo runs 1.0x at n=1 (a literal point),
+                                # 1.9x at n=3, 2.9x at n=5, and only settles near 6.5-6.9x past
+                                # n=60. So 5 stops the degenerate case; it does NOT make a band
+                                # off 5 turns trustworthy, and a fresh install's first estimates
+                                # will be far too narrow. Raise it if that lands badly in use.
 
 voice_commands:                 # matched post-transcription, exact-prefix, case-insensitive
   send: ["send"]

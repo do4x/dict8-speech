@@ -286,6 +286,188 @@ def cmd_quota(args, cfg) -> int:
     return 0
 
 
+def cmd_estimate(args, cfg) -> int:
+    """Estimate this turn's token cost as a range, or print the held-out comparison.
+
+    Exit codes — note that 4 is an ANSWER, not a failure:
+      0  a range was produced
+      2  bad input (an unknown bucket name)
+      3  a config gap (handled in main())
+      4  out of distribution: the estimator declined to invent a range. U3's hook must
+         treat 4 as a normal outcome and simply add no estimate to the prompt context;
+         treating it as an error would turn "we don't know" into a logged crash.
+    """
+    from dict8.advise import estimator as est_mod
+
+    with _open_store(cfg) as store:
+        rows = est_mod.load_turns(store)
+        gate = est_mod.Gate.from_config(cfg)
+
+        if args.eval:
+            # --json describes one estimate; --eval is a validation report with no
+            # estimate in it. Accepting both and quietly printing the table would answer
+            # a question the caller did not ask, in a format they cannot parse.
+            if args.json:
+                print("estimate: --json and --eval are different outputs — --json is one "
+                      "estimate for the hook, --eval is the held-out table. Pick one.",
+                      file=sys.stderr)
+                return 2
+            return _render_eval(rows, gate, cfg)
+
+        if args.words is None:
+            print("estimate: --words N is required (or --eval for the held-out table). "
+                  "Nothing was estimated.", file=sys.stderr)
+            return 2
+
+        # A negative count is not a feature value the store could ever hold, so it would
+        # be compared against a word range and a band built from non-negative history and
+        # silently answered. Reject it rather than answer a question nobody asked.
+        for flag, value in (("--words", args.words), ("--files", args.files)):
+            if value < 0:
+                print(f"estimate: {flag} {value} is negative; both are counts. "
+                      f"Nothing was estimated.", file=sys.stderr)
+                return 2
+
+        buckets = list(cfg.require("classifier.buckets"))
+        if args.bucket is not None and args.bucket not in buckets:
+            print(f"estimate: {args.bucket!r} is not one of classifier.buckets "
+                  f"({', '.join(buckets)}). Nothing was estimated.", file=sys.stderr)
+            return 2
+
+        feats = est_mod.Features(words=args.words, files=args.files,
+                                 bucket=args.bucket, model=args.model)
+        try:
+            estimate = est_mod.select_method(cfg, rows)(rows, gate).predict(feats)
+        except est_mod.EstimatorError as exc:
+            print(f"estimate: {exc}", file=sys.stderr)
+            return 2
+
+        if args.json:
+            print(json.dumps(est_mod.to_json(estimate), indent=2))
+        else:
+            for line in est_mod.render(estimate):
+                print(line)
+    return 4 if estimate.low is None else 0
+
+
+def _render_eval(rows, gate, cfg) -> int:
+    """The held-out comparison table. Reproducible: no sampling, no seed — leave-one-out."""
+    from dict8.advise import estimator as est_mod
+
+    share = est_mod.cache_read_share(rows)
+    if not rows or share is None:
+        # A held-out table over zero turns would print a row of NaNs and look like a
+        # result. The gate has to be able to FAIL on an empty measurement, so it does.
+        print(f"estimate --eval: {len(rows)} usable turns in {cfg.path('paths.db')} — "
+              f"nothing to validate against. Run `dict8 backfill` (and "
+              f"`dict8 classify-backfill` for the buckets) first.", file=sys.stderr)
+        return 1
+
+    counts = est_mod.bucket_counts(rows)
+    print(f"turns fitted     : {len(rows)}  (message_count > 0 and total tokens > 0)")
+    print(f"cache-read share : {share * 100:.2f}% of all tokens in the fit — the target is "
+          f"mostly context re-reads (HANDOFF §4.8)")
+    print(f"buckets          : " + "  ".join(f"{b}={n}" for b, n in counts.items()))
+    print(f"models           : " + "  ".join(
+        f"{m}={sum(1 for r in rows if r.model == m)}"
+        for m in sorted({r.model for r in rows if r.model})))
+    print(f"band             : {gate.low_q:g}/{gate.high_q:g} "
+          f"(nominal coverage {(gate.high_q - gate.low_q) * 100:g}%)")
+    print(f"floors           : ood_min_bucket_samples={gate.ood_min_bucket}  "
+          f"min_samples_for_bucket={gate.min_bucket}")
+    print(f"validation       : leave-one-out over all {len(rows)} turns\n")
+
+    hdr = (f"{'method':<12}{'held-out':>10}{'refused':>9}{'MAPE %':>10}{'MdAPE %':>10}"
+           f"{'coverage':>10}{'band hi/lo':>12}")
+    print(hdr)
+    print("-" * len(hdr))
+    results = []
+    for cls in (est_mod.QuantileEstimator, est_mod.RegressionEstimator):
+        r = est_mod.leave_one_out(rows, gate, cls)
+        results.append(r)
+        print(f"{r.method:<12}{r.n:>10}{r.refused:>9}{r.mape:>10.1f}{r.mdape:>10.1f}"
+              f"{r.coverage:>10.3f}{r.median_width:>12.1f}")
+    print("-" * len(hdr))
+
+    scored = [r for r in results if r.n]
+    if not scored:
+        # Every held-out point was refused, so MAPE and coverage are NaN. A table of NaNs
+        # that exits 0 is a gate that passes on an empty measurement — it must not.
+        print(f"\nestimate --eval: no held-out point produced a range "
+              f"({results[0].refused} of {len(rows)} refused by the out-of-distribution "
+              f"gate). There is nothing measured here to pass a gate on.", file=sys.stderr)
+        return 1
+
+    floor = int(cfg.require("estimate.min_samples_for_regression"))
+    winner = min(scored, key=lambda r: r.mdape)
+    print(f"\nlower MdAPE      : {winner.method}")
+    # `estimate.method: regression` under the sample floor is a refusal, not a crash:
+    # the config comment tells the reader to try exactly that, and --eval is the report
+    # that should explain why it will not ship. The table above is still valid output.
+    try:
+        print(f"shipped          : {str(cfg.require('estimate.method'))} -> "
+              f"{est_mod.select_method(cfg, rows).name}")
+    except est_mod.EstimatorError as exc:
+        print(f"shipped          : NOTHING — {exc}")
+    if winner.method == est_mod.RegressionEstimator.name:
+        print(f"NOT shipped      : the regression needs "
+              f"estimate.min_samples_for_regression={floor} turns and there are "
+              f"{len(rows)}. The floor holds whatever it scores.")
+
+    print(f"\nband sweep (shipped method, leave-one-out) — the measurement behind "
+          f"estimate.interval_low_q/high_q")
+    hdr2 = f"{'band':<14}{'nominal':>9}{'coverage':>10}{'band hi/lo':>12}{'MdAPE %':>10}"
+    print(hdr2)
+    print("-" * len(hdr2))
+    for (lo, hi), r in est_mod.sweep_bands(rows, gate, est_mod.EVAL_BANDS):
+        print(f"{f'{lo:g}/{hi:g}':<14}{(hi - lo) * 100:>8.0f}%{r.coverage:>10.3f}"
+              f"{r.median_width:>12.1f}{r.mdape:>10.1f}")
+
+    print(f"\npooling sweep (shipped method, leave-one-out) — the measurement behind "
+          f"estimate.min_samples_for_bucket:\nat and above the floor a bucket uses its own "
+          f"band, below it the pooled one. Refusal floor pinned at 1 so nothing is refused.")
+    hdr3 = f"{'floor':<8}{'held-out':>10}{'refused':>9}{'MAPE %':>10}{'MdAPE %':>10}{'coverage':>10}{'band hi/lo':>12}"
+    print(hdr3)
+    print("-" * len(hdr3))
+    for f, r in est_mod.sweep_pooling(rows, gate, est_mod.EVAL_FLOORS):
+        print(f"{f:<8}{r.n:>10}{r.refused:>9}{r.mape:>10.1f}{r.mdape:>10.1f}"
+              f"{r.coverage:>10.3f}{r.median_width:>12.1f}")
+
+    print(f"\nrefusal sweep (shipped method, leave-one-out) — the measurement behind "
+          f"estimate.ood_min_bucket_samples:\nONLY the refusal floor moves; "
+          f"min_samples_for_bucket stays at {gate.min_bucket}, so this table is about "
+          f"refusing, not about pooling.")
+    print(hdr3)
+    print("-" * len(hdr3))
+    for f, r in est_mod.sweep_bucket_floor(rows, gate, est_mod.EVAL_FLOORS):
+        print(f"{f:<8}{r.n:>10}{r.refused:>9}{r.mape:>10.1f}{r.mdape:>10.1f}"
+              f"{r.coverage:>10.3f}{r.median_width:>12.1f}")
+
+    print(f"\npooled band vs n — the only evidence available for "
+          f"estimate.ood_min_pooled_samples.\nThe band a fresh install would print from "
+          f"its first n turns. Leave-one-out cannot measure this floor: the pooled group "
+          f"is\nalways the whole store minus one, far above any floor worth arguing about.")
+    hdr4 = f"{'n':<8}{'low':>16}{'median':>16}{'high':>16}{'hi/lo':>10}"
+    print(hdr4)
+    print("-" * len(hdr4))
+    for n, lo, med, hi in est_mod.pooled_band_vs_n(rows, gate, est_mod.EVAL_PREFIXES):
+        flag = "  <- below estimate.ood_min_pooled_samples: refused" \
+            if n < gate.ood_min_pooled else ""
+        print(f"{n:<8}{lo:>16,}{med:>16,}{hi:>16,}{hi / max(lo, 1):>10.1f}{flag}")
+    all_totals = sorted(r.total_tokens for r in rows)
+    print(f"{len(rows):<8}{est_mod.quantile(all_totals, gate.low_q):>16,.0f}"
+          f"{est_mod.quantile(all_totals, 0.5):>16,.0f}"
+          f"{est_mod.quantile(all_totals, gate.high_q):>16,.0f}"
+          f"{est_mod.quantile(all_totals, gate.high_q) / max(est_mod.quantile(all_totals, gate.low_q), 1):>10.1f}"
+          f"  <- today")
+
+    print(f"\ncaveat           : unit is TOKENS. {share * 100:.1f}% of them are cache reads; "
+          f"how quota % weights those is unknown until `dict8 quota` readings exist.")
+    print(f"                   the regression's band comes from its own IN-SAMPLE residual "
+          f"quantiles, so its held-out coverage above is slightly flattered.")
+    return 0
+
+
 def cmd_classify_backfill(args, cfg) -> int:
     """Classify every turn with no task_type yet.
 
@@ -379,6 +561,29 @@ def main(argv: list[str] | None = None) -> int:
                    help="when the reading was taken, if not now (naive = this machine's "
                         "local time). For a check-in typed in after the fact.")
     q.set_defaults(func=cmd_quota)
+
+    e = sub.add_parser(
+        "estimate", help="token range for a turn, from the backfill (never USD)",
+        epilog="exit codes: 0 a range was produced · 2 bad input · 3 a config gap · "
+               "4 out of distribution, no range. 4 is an ANSWER, not a failure: the "
+               "estimator has no comparable history and declines to invent one. A caller "
+               "(the UserPromptSubmit hook) treats 4 as 'no estimate this time' and adds "
+               "nothing to the prompt — never as an error.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    e.add_argument("--words", type=int,
+                   help="prompt length in words. Required unless --eval.")
+    e.add_argument("--files", type=int, default=0,
+                   help="files already touched. At UserPromptSubmit time this is 0 by "
+                        "definition — nothing has been touched yet — which is why it "
+                        "defaults to 0 rather than to a guess.")
+    e.add_argument("--bucket", help="classifier bucket; must be one of classifier.buckets. "
+                                    "Omit when unclassified: the pooled distribution is used.")
+    e.add_argument("--model", help="model id as it appears in the transcripts. Omit to leave "
+                                   "the model unconstrained.")
+    e.add_argument("--json", action="store_true", help="machine shape for the U3 hook")
+    e.add_argument("--eval", action="store_true",
+                   help="print the leave-one-out comparison of both methods instead")
+    e.set_defaults(func=cmd_estimate)
 
     cb = sub.add_parser("classify-backfill", help="fill task_type on unclassified turns")
     cb.add_argument("--limit", type=int, help="classify at most N turns (oldest first)")
