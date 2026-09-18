@@ -9,12 +9,17 @@ process avoids that category of leak entirely.
 Measured on this machine (Apple M5) against `prompts/classify.evals.yml`, 2026-09-15:
 `mlx-community/Qwen2.5-3B-Instruct-4bit` scores 12/12 (gate is >=10/12), warm latency
 668-794ms on that eval set's 5-15 word inputs, against `classifier.timeout_ms: 800` — real
-margin but thin (as little as 6ms on the worst case). Real historical turns run wider:
-backfilling the 68 genuine turns in this corpus, 55 classified within budget at
-599-792ms and 13 legitimately exceeded it — turns over roughly 500 words need more than
-800ms to prefill, which is expected, not a bug. `timeout_ms` is doing real work here, not
-a formality, which is the whole reason `classify()` enforces it itself rather than
-trusting the model to stay under it.
+margin but thin (as little as 6ms on the worst case). Real historical turns run wider.
+Re-measured 2026-09-18 on the 82 genuine turns in this corpus: 69 classified at
+598-799ms, 13 omitted — and a second pass omitted the same 13, so they are not restart
+noise (a fresh worker's first call is normal: 673-722ms on 4 fresh workers). Every
+classified turn is <=155 words (median 16); every omitted turn is >=93 words (median 361,
+max 4028). The static ~450-token preamble is prefilled on every call and leaves only
+~110-170ms of headroom for the turn itself, so this budget covers roughly the first ~100
+words. The turns that miss out are the long, detailed ones — the ones enhancement and the
+estimate matter most for. (An earlier version of this note said ">500 words"; that was
+wrong — 7 of the 13 are under 400.) `timeout_ms` is doing real work here, which is why
+`classify()` enforces it itself rather than trusting the model to stay under it.
 
 **"68 genuine turns", not the 234 first found.** The first backfill attempt fed this
 classifier things like a 28,000-token Skill-loading dump and an IDE selection block as if

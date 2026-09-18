@@ -138,9 +138,10 @@ classifier:
   model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
                                 # MEASURED on this machine (Apple M5) against
                                 # prompts/classify.evals.yml: 12/12 (gate is >=10/12),
-                                # warm latency 668-794ms. Real turns: 55/68 backfilled
-                                # within budget at 599-792ms, 13 legitimately over (>500
-                                # words). See dict8/advise/classifier.py docstring — the
+                                # warm latency 610-794ms. Real turns (2026-09-18): 69/82
+                                # classified at 598-799ms; the 13 omitted are all >=93
+                                # words (classified max 155), so the budget covers roughly
+                                # the first ~100 words. See dict8/advise/classifier.py docstring — the
                                 # margin against timeout_ms below is real but thin; the
                                 # client enforces the timeout itself and kills+replaces
                                 # its worker on overrun rather than trusting the model to

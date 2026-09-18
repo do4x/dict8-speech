@@ -8,23 +8,29 @@ invariant 4). A field that is not in this document must not appear in a parser.
 2,866 usage-bearing assistant rows · 1,128 unique `message.id`.
 
 **Claude Code versions present in the corpus** (top-level `version`), measured over the
-whole corpus after backfill, not a sample:
+whole corpus after backfill, not a sample. Re-measured 2026-09-18:
 
-| `version` | messages | first seen | last seen |
-|---|---|---|---|
-| `2.1.270` | 90 | 2026-09-14T21:48 | 2026-09-15T09:24 |
-| `2.1.267` | 235 | 2026-09-10T11:04 | 2026-09-14T11:06 |
-| `2.1.266` | 350 | 2026-09-09T12:28 | 2026-09-09T23:45 |
-| `2.1.261` | 217 | 2026-09-05T09:33 | 2026-09-08T10:58 |
-| `2.1.258` | 65 | 2026-09-03T09:47 | 2026-09-03T12:51 |
-| `2.1.255` | 6 | 2026-09-03T01:02 | 2026-09-03T01:22 |
-| `1.0` | 184 | 2026-09-08T07:29 | 2026-09-09T12:27 |
+| `version` | messages | first seen |
+|---|---|---|
+| `2.1.274` | 21 | 2026-09-18T10:15 |
+| `2.1.270` | 303 | 2026-09-14T21:48 |
+| `2.1.267` | 235 | 2026-09-10T11:04 |
+| `2.1.266` | 350 | 2026-09-09T12:28 |
+| `2.1.261` | 217 | 2026-09-05T09:33 |
+| `2.1.258` | 65 | 2026-09-03T09:47 |
+| `2.1.255` | 6 | 2026-09-03T01:02 |
+| `1.0` | 184 | 2026-09-08T07:29 |
 
-**Observed writing version: `2.1.270`** — the sessions being appended to right now.
+**Observed writing version: `2.1.274`** — first appeared 2026-09-18. Checked against its
+56 assistant lines: the four counted usage fields and `message.id` are present on every
+one, no `usage` key outside §4's list appeared, and `cache_creation` is still a
+decomposition of `cache_creation_input_tokens` (§4.1). **Schema unchanged from 2.1.270.**
+The Phase 1 gate's "every corpus version is documented" check fails on any new version by
+design — that is what caught this one; it is a prompt to re-verify, not a bug.
 
 **`claude --version` is not the version writing the transcripts — FINDING.** The CLI on
-`PATH` reports **2.1.267**, while the session that produced these very lines writes
-**2.1.270**: the editor extension bundles its own copy. Pinning the schema against
+`PATH` reports **2.1.267**, while the sessions writing these lines are on **2.1.270** and
+now **2.1.274**: the editor extension bundles its own copy. Pinning the schema against
 `claude --version` would pin it against a client that is not writing the files. Read the
 version off the transcript lines, which is what the table above does.
 
@@ -34,7 +40,7 @@ under two projects (`Cleanly`, `uNotch`) — a different client writing into the
 They are otherwise schema-identical: same `message.usage` keys, same `model` strings, real
 `sessionId`/`cwd`.
 
-**Do not filter or branch on `version`.** The usage schema is stable across all seven
+**Do not filter or branch on `version`.** The usage schema is stable across all eight
 values, the set grows with every release, and dropping an unrecognised one silently
 discards real turns. Record it; never gate on it.
 

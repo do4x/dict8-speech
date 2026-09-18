@@ -104,8 +104,8 @@ then the live meter (6). MCP was considered and rejected: an MCP tool runs insid
 model's turn, which is after the tokens are committed — the wrong side of the decision.
 
 ## Phase state
-Current phase: **1** (usage core) — gate run 2026-09-15, **8/8 passing**, awaiting Denis's
-approval. Phase 2 has not been started. Re-run with `uv run scripts/gate_phase1.py`.
+Current phase: **1** (usage core) — gate run 2026-09-15, re-run 2026-09-18, **8/8
+passing**; Denis has not explicitly signed it off. Phase 2 has not been started. Re-run with `uv run scripts/gate_phase1.py`.
 Phases are sequential and gated. Do not start phase N+1 until the phase N gate has been
 run and its output approved by Denis.
 
@@ -115,10 +115,14 @@ Out-of-order work already banked, from before the phases were renumbered (see gi
   this box, so `stt.*`, `hardware.mic_device` stay TBD and the Phase 3 gate is open.
   Phase 3 is not done and does not count as done.
 - **Phase 5's classifier pulled forward** (Denis, 2026-09-15): Phase 2's estimator needs a
-  real feature to fit on — prompt length measured r=-0.021 against tokens on this corpus,
-  essentially zero. `prompts/classify.md` runs locally via `dict8/advise/classifier.py`
-  (`mlx-lm`, see Third-party), gate 12/12, backfilled onto 68 real turns via
-  `dict8 classify-backfill` (55 classified, 13 legitimately over the latency budget).
-  Bucket medians show real separation (unknown 643K -> quick-fix 894K -> debug 2.5M ->
-  feature-build 6.4M tokens) — small n, but a usable Phase 2 feature where word count
-  wasn't. Detection and enhancement (the rest of Phase 5) are NOT built.
+  real feature to fit on — prompt length measured r=-0.009 against tokens (n=81), i.e.
+  none. `prompts/classify.md` runs locally via `dict8/advise/classifier.py` (`mlx-lm`, see
+  Third-party); eval gate 12/12 on 09-15, 11/12 on 09-18 (one call timed out under
+  transient load — the latency margin is thin). Re-measured 2026-09-18 on 82 turns: 69
+  classified, 13 not — every unclassified turn is >=93 words and every classified one is
+  <=155, so the 800ms budget covers roughly the first ~100 words and long, detailed
+  prompts get no bucket. Bucket medians are ordered as hoped (unknown 657K, quick-fix
+  832K, debug 1.5M, feature-build 2.9M tokens; no `architecture` turns) but the
+  interquartile ranges overlap heavily and n is 10-28 per bucket: a weak signal, not the
+  ~10x spread first reported on n=8-26. Detection and enhancement (the rest of Phase 5)
+  are NOT built. Full state and caveats: `docs/HANDOFF.md`.
