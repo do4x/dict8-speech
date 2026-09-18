@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null && command -v uv >/dev/null 2>&1 && uv run --quiet dict8 hook user-prompt-submit; exit 0'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

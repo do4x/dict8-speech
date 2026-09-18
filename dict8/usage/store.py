@@ -28,7 +28,7 @@ from typing import Iterable, Iterator
 
 from dict8.usage.parser import AssistantMessage, Turn
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -152,6 +152,40 @@ CREATE TABLE IF NOT EXISTS quota_readings (
     recorded_at TEXT NOT NULL           -- ISO-8601 UTC, when this row was written
 );
 CREATE INDEX IF NOT EXISTS idx_quota_readings_ts ON quota_readings(ts);
+
+-- One row per estimate the UserPromptSubmit hook produced (schema v5), including the
+-- ones it REFUSED to produce (`ood = 1`, low/point/high NULL). Phase 6 logs
+-- estimate-vs-actual per turn and cannot do that from an estimate that was never written
+-- down; a refusal is as much a prediction as a range is, and dropping refusals here would
+-- make the recorded estimates look better calibrated than they are.
+--
+-- No prompt text (privacy.store_transcripts: features_only) and no USD (invariant 6):
+-- `prompt_words` is the only thing carried over from what was typed.
+--
+-- `prompt_id` is the hook payload's own field, OBSERVED equal to `promptId` on the user
+-- line of the transcript (docs/verified-schemas.md section 8) — NOT to `turns.prompt_uuid`,
+-- which is that line's `uuid`. So it is a join key for Phase 6 via the transcript, not a
+-- foreign key into `turns`, and it is deliberately not declared as one.
+--
+-- `est_group` spells out `group` because GROUP is an SQL keyword: a bare `group` column
+-- only works quoted, and the first unquoted query against it is a syntax error at runtime
+-- rather than at review time.
+CREATE TABLE IF NOT EXISTS hook_estimates (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT,                   -- hook payload session_id; NULL if it was absent
+    prompt_id    TEXT,                   -- hook payload prompt_id; NULL if it was absent
+    ts           TEXT NOT NULL,          -- ISO-8601 UTC, when the hook ran
+    prompt_words INTEGER NOT NULL,       -- word count of the submitted prompt
+    method       TEXT NOT NULL,          -- estimate.method that produced it
+    est_group    TEXT NOT NULL,          -- which population the range came from
+    n            INTEGER NOT NULL,       -- turns behind that population
+    low          INTEGER,                -- NULL when the estimator refused
+    point        INTEGER,
+    high         INTEGER,
+    ood          INTEGER NOT NULL        -- 1 = out of distribution / refused
+);
+CREATE INDEX IF NOT EXISTS idx_hook_estimates_ts      ON hook_estimates(ts);
+CREATE INDEX IF NOT EXISTS idx_hook_estimates_session ON hook_estimates(session_id);
 """
 
 TOKEN_COLUMNS = ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")
@@ -239,12 +273,12 @@ class Store:
         covers that case for anyone who ran the Phase 1 schema (v2) before v3 added the
         classifier columns.
 
-        v3 -> v4 adds `quota_readings`, which is a whole new table rather than a new
-        column, so it needs no ALTER: `CREATE TABLE IF NOT EXISTS` in the DDL above has
-        already run and an existing v3 database gains the empty table on open with every
-        row it holds untouched. Nothing is dropped, renamed or backfilled — opening an
-        older database is still non-destructive, and `schema_version_before` records what
-        it was so the upgrade can be shown.
+        v3 -> v4 adds `quota_readings`, and v4 -> v5 adds `hook_estimates`. Both are whole
+        new tables rather than new columns, so they need no ALTER: `CREATE TABLE IF NOT
+        EXISTS` in the DDL above has already run and an existing older database gains the
+        empty table on open with every row it holds untouched. Nothing is dropped, renamed
+        or backfilled — opening an older database is still non-destructive, and
+        `schema_version_before` records what it was so the upgrade can be shown.
         """
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(turns)")}
         if "task_type_confidence" not in cols:
@@ -484,6 +518,40 @@ class Store:
             "ORDER BY ts DESC, id DESC LIMIT 1"
         ).fetchone()
 
+    def recent_quota_readings(self, limit: int) -> list[sqlite3.Row]:
+        """The `limit` most recent readings, newest first, ordered the same way
+        `latest_quota_reading()` orders them so the first row of this list and that row
+        are always the same reading.
+
+        A burn rate needs two points; `latest_quota_reading()` returns one. Taking the
+        second by any other ordering (recorded_at, id) would silently pair readings that
+        are not adjacent in the series the age is measured on.
+        """
+        return list(self.conn.execute(
+            "SELECT id, weekly_pct, ts, source, recorded_at FROM quota_readings "
+            "ORDER BY ts DESC, id DESC LIMIT ?", (int(limit),)))
+
+    # ---- hook estimates ---------------------------------------------------------
+
+    def add_hook_estimate(self, *, session_id: str | None, prompt_id: str | None, ts: str,
+                          prompt_words: int, method: str, est_group: str, n: int,
+                          low: int | None, point: int | None, high: int | None,
+                          ood: bool) -> int:
+        """Append one estimate produced at UserPromptSubmit. Returns its rowid.
+
+        Keyword-only: the ten columns are mostly integers, and a positional call that
+        transposes `low` and `high` would store a backwards band that nothing downstream
+        could detect.
+        """
+        with self.tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO hook_estimates(session_id, prompt_id, ts, prompt_words, "
+                "method, est_group, n, low, point, high, ood) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (session_id, prompt_id, ts, int(prompt_words), method, est_group, int(n),
+                 low, point, high, int(bool(ood))),
+            )
+        return int(cur.lastrowid)
+
     # ---- reads ------------------------------------------------------------------
 
     def totals(self, since: str | None = None, until: str | None = None) -> sqlite3.Row:
@@ -527,6 +595,7 @@ class Store:
 
     def count(self, table: str) -> int:
         if table not in {"messages", "turns", "turn_messages", "turn_prompts",
-                         "message_files", "file_cursors", "quota_readings"}:
+                         "message_files", "file_cursors", "quota_readings",
+                         "hook_estimates"}:
             raise ValueError(f"unknown table {table!r}")
         return self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

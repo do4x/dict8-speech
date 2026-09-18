@@ -468,6 +468,91 @@ def _render_eval(rows, gate, cfg) -> int:
     return 0
 
 
+# The hook handlers, by the event name the settings file names them with. Adding
+# PostToolUse / SessionEnd in Phase 6 is a line each here and a module in dict8.hooks.
+HOOK_HANDLERS = {"user-prompt-submit": "dict8.hooks.user_prompt_submit"}
+
+HOOK_HELP = """usage: dict8 hook <event> [--config PATH]
+
+Run a Claude Code hook handler. Reads the hook payload as JSON on stdin and writes the
+hook's JSON response on stdout.
+
+events:
+  """ + "\n  ".join(sorted(HOOK_HANDLERS)) + """
+
+This command ALWAYS exits 0 and never writes to stderr (CLAUDE.md invariant 8): a hook
+that errors, hangs, finds no database or hits a config gap lets the prompt through and
+writes one line to `paths.logs`/hooks.log saying why. Exit code 2 is how a Claude Code
+hook blocks a prompt, so no path here can reach it — which is also why this command does
+not go through argparse, whose own parse errors exit 2.
+"""
+
+
+def cmd_hook(argv: list[str]) -> int:
+    """`dict8 hook <event>` — parsed by hand, on purpose.
+
+    argparse exits 2 on an unrecognised argument, and 2 is the one exit code that BLOCKS
+    the user's prompt. A typo in .claude/settings.json must degrade to "no estimate this
+    time", not to "your prompt did not send", so this path never constructs a parser.
+    """
+    # Imported FIRST, before the config read: `dict8.hooks` starts the clock that
+    # `hooks.timeout_ms` is measured against, so anything imported or read after this
+    # line counts against the budget — including config.yml itself.
+    from dict8 import hooks as hooks_pkg
+
+    event: str | None = None
+    config_path: str | None = None
+    tokens = list(argv)
+    while tokens:
+        tok = tokens.pop(0)
+        if tok in ("-h", "--help"):
+            print(HOOK_HELP)
+            return 0
+        if tok == "--config":
+            config_path = tokens.pop(0) if tokens else None
+            continue
+        if tok.startswith("--config="):
+            config_path = tok.split("=", 1)[1]
+            continue
+        if event is None and not tok.startswith("-"):
+            event = tok
+
+    # A named config that will not load is reported as an ERROR, never swapped for the
+    # default one. `cfg = None` used to mean both "none was named" and "the named one
+    # failed", and the handler resolved that ambiguity by loading the default — so a
+    # scratch config with a typo in it estimated from, and wrote a row into, the real
+    # store. The two cases are now separate values.
+    cfg = None
+    cfg_error: str | None = None
+    try:
+        cfg = config_mod.load(Path(config_path)) if config_path else config_mod.load()
+    except Exception as exc:
+        cfg_error = f"{type(exc).__name__}: {exc}"
+        if config_path is None:
+            # Nothing was named, so there is no wrong file to have fallen back to and
+            # nothing to distinguish; the handler's own silent path covers it.
+            cfg_error = None
+
+    module_name = HOOK_HANDLERS.get(event or "")
+    if module_name is None:
+        if cfg is not None:
+            hooks_pkg.log(cfg, hook=event, outcome="failed-open",
+                          reason=f"unknown hook event {event!r}; known: "
+                                 f"{', '.join(sorted(HOOK_HANDLERS))}")
+        return 0
+    from importlib import import_module
+    return int(import_module(module_name).main(cfg=cfg, cfg_error=cfg_error))
+
+
+def cmd_hook_args(args, cfg) -> int:
+    """The argparse-reachable spelling (`dict8 --config X hook <event>`), so the command
+    is discoverable in `dict8 --help`. Same handler, same guarantee of exit 0."""
+    argv = [args.event]
+    if args.config:
+        argv += ["--config", str(args.config)]
+    return cmd_hook(argv)
+
+
 def cmd_classify_backfill(args, cfg) -> int:
     """Classify every turn with no task_type yet.
 
@@ -585,12 +670,29 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the leave-one-out comparison of both methods instead")
     e.set_defaults(func=cmd_estimate)
 
+    h = sub.add_parser("hook", help="run a Claude Code hook handler (payload on stdin)",
+                       epilog="always exits 0 and never writes to stderr — invariant 8.",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    h.add_argument("event", help=f"one of: {', '.join(sorted(HOOK_HANDLERS))}")
+    h.set_defaults(func=cmd_hook_args, is_hook=True)
+
     cb = sub.add_parser("classify-backfill", help="fill task_type on unclassified turns")
     cb.add_argument("--limit", type=int, help="classify at most N turns (oldest first)")
     cb.set_defaults(func=cmd_classify_backfill)
 
+    # Hooks bypass argparse entirely (see cmd_hook): its parse errors and its
+    # `required=True` subcommand both exit 2, and a hook that exits 2 blocks the prompt.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "hook":
+        return cmd_hook(raw[1:])
+
     args = p.parse_args(argv)
-    cfg = config_mod.load(args.config)
+    try:
+        cfg = config_mod.load(args.config)
+    except Exception:
+        if not getattr(args, "is_hook", False):
+            raise
+        cfg = None
     try:
         return args.func(args, cfg)
     except config_mod.ConfigGap as exc:

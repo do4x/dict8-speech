@@ -237,3 +237,81 @@ Most-used tool overall is `Bash` (738), which carries **no** `file_path`. Dict8 
 **distinct `input.file_path` values across the turn**, read generically from any `tool_use`
 block that has that key — so a tool added in a later Claude Code release is picked up without
 a code change, per invariant 3.
+
+## 8. `UserPromptSubmit` hook payload — captured on this machine
+
+**Captured 2026-09-18**, not remembered (invariant 4). Method: a temporary capture hook
+registered through `claude --settings <scratch file>` whose command was `/bin/cat >
+<scratch>/ups-payload.json`, triggered by a real invocation from this repo root:
+`claude -p "reply with the single word ok" --model haiku`. The payload below is that file
+verbatim, with ids intact. The nesting `CLAUDECODE` guard was cleared with `env -u
+CLAUDECODE …`; no other change was needed.
+
+Captured **twice, from two different Claude Code binaries**, because this machine runs two
+(see the finding above about `claude --version`):
+
+| binary | `claude --version` | field set |
+|---|---|---|
+| `/opt/homebrew/bin/claude` | **2.1.267** | the seven below |
+| VS Code extension's bundled copy (`$CLAUDE_CODE_EXECPATH`) | **2.1.274** | identical |
+
+```json
+{
+  "session_id": "a070b9c8-60b1-4074-8949-0fe9a70e9f54",
+  "transcript_path": "/Users/doax/.claude/projects/-Users-doax-Projects-Dict8/a070b9c8-60b1-4074-8949-0fe9a70e9f54.jsonl",
+  "cwd": "/Users/doax/Projects/Dict8",
+  "prompt_id": "2eb6131e-ef06-47db-a605-862712ba3748",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "reply with the single word ok"
+}
+```
+
+| field | type | observed value shape | used by Dict8 |
+|---|---|---|---|
+| `session_id` | str (uuid) | the session writing the transcript | yes — `hook_estimates.session_id` |
+| `transcript_path` | str (abs path) | `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, matching §1 | no (recorded here; the hook reads its own DB, not this file) |
+| `cwd` | str (abs path) | where `claude` was launched | no |
+| `prompt_id` | str (uuid) | see below | yes — `hook_estimates.prompt_id` |
+| `permission_mode` | str | `"default"` | no |
+| `hook_event_name` | str | `"UserPromptSubmit"` | yes — echoed back in the response |
+| `prompt` | str | the user's text, verbatim | word count only; never stored |
+
+Every field is read as **optional** by `dict8.hooks.user_prompt_submit`: seven fields on
+two versions is not a guarantee, and a hook that raises on a missing key is a hook that
+blocks a prompt (invariant 8).
+
+**`prompt_id` is `promptId` on the transcript's user line — not `turns.prompt_uuid`.**
+Checked on both captures: the id appears exactly once in the resulting JSONL, on the
+`type: "user"` line, under the key `promptId`. That line's `uuid` is a *different* uuid,
+and `uuid` is what `turns.prompt_uuid` holds (§6). So Phase 6 joins an estimate to its
+turn via `promptId` on the transcript line, not by a foreign key into `turns`. The parser
+does not currently record `promptId`.
+
+### 8.1 The response, and where it lands — round-tripped
+
+Printing this on stdout with exit 0 adds context to the turn:
+
+```json
+{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "…"}}
+```
+
+**Verified end to end**, not assumed: with the hook registered in this repo's
+`.claude/settings.json`, `claude -p "In the Dict8 usage estimate context attached to this
+prompt, what is the n= value and the method name?" --model haiku` answered
+`n=96, quantile` — both values produced by the estimator on this machine seconds earlier.
+
+The context arrives as its **own transcript line**, not spliced into the prompt:
+
+```
+{"type": "attachment", "attachment": {"type": "hook_additional_context",
+ "content": ["Dict8 usage estimate for the prompt above — advisory context …"]}, …}
+```
+
+That separation is invariant 1 holding structurally rather than by convention: the user's
+`prompt` string reaches Claude Code byte-for-byte as typed, and everything Dict8 adds sits
+in a `hook_additional_context` attachment beside it.
+
+**Exit codes.** 0 = allow, and stdout is consumed as above. **2 = BLOCK the prompt** —
+which is why no code path in `dict8.hooks` can return anything but 0, including the
+argument parsing (`dict8 hook` is parsed by hand precisely because argparse exits 2).
