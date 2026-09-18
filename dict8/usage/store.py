@@ -28,7 +28,7 @@ from typing import Iterable, Iterator
 
 from dict8.usage.parser import AssistantMessage, Turn
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -130,6 +130,28 @@ CREATE TABLE IF NOT EXISTS file_cursors (
     mtime      REAL    NOT NULL,
     updated_at TEXT    NOT NULL
 );
+
+-- Manual weekly-quota check-ins (schema v4). Invariant 6: the unit is percent of the
+-- weekly quota, never USD, so there is no dollar column here either.
+--
+-- Two timestamps, because they are two different facts. `ts` is when the reading was
+-- TAKEN off Claude Code's /usage; `recorded_at` is when Dict8 wrote it down. They are
+-- usually seconds apart and occasionally a day apart, and it is `ts` that decides the
+-- age everything downstream is judged on. Collapsing them would let a reading typed in
+-- today about yesterday look fresh.
+--
+-- Append-only, and deliberately not a single-row table: a check-in is an observation,
+-- and the calibration this feeds needs the series, not the last value. `source` is
+-- carried per row rather than assumed, so a future non-manual source cannot be mistaken
+-- for something a human read and typed.
+CREATE TABLE IF NOT EXISTS quota_readings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    weekly_pct  REAL NOT NULL,
+    ts          TEXT NOT NULL,          -- ISO-8601 UTC, when the reading was taken
+    source      TEXT NOT NULL,          -- config quota.source
+    recorded_at TEXT NOT NULL           -- ISO-8601 UTC, when this row was written
+);
+CREATE INDEX IF NOT EXISTS idx_quota_readings_ts ON quota_readings(ts);
 """
 
 TOKEN_COLUMNS = ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")
@@ -190,6 +212,9 @@ class Store:
         # WAL so the tail-reader can write while a reader (CLI, hook) queries.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # Read before the DDL runs: afterwards every database looks like the current
+        # schema, so this is the only moment an upgrade can be observed rather than claimed.
+        self.schema_version_before = self._stored_schema_version()
         self.conn.executescript(DDL)
         self._migrate()
         self.conn.execute(
@@ -199,11 +224,27 @@ class Store:
         )
         self.conn.commit()
 
+    def _stored_schema_version(self) -> int | None:
+        """What the file on disk says its schema version is, or None for a fresh database."""
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return None                      # no meta table yet: this file is brand new
+        return int(row["value"]) if row else None
+
     def _migrate(self) -> None:
         """Additive column migrations. DDL above is CREATE-IF-NOT-EXISTS, which never
         adds a column to a table that already exists from an older schema version — this
         covers that case for anyone who ran the Phase 1 schema (v2) before v3 added the
         classifier columns.
+
+        v3 -> v4 adds `quota_readings`, which is a whole new table rather than a new
+        column, so it needs no ALTER: `CREATE TABLE IF NOT EXISTS` in the DDL above has
+        already run and an existing v3 database gains the empty table on open with every
+        row it holds untouched. Nothing is dropped, renamed or backfilled — opening an
+        older database is still non-destructive, and `schema_version_before` records what
+        it was so the upgrade can be shown.
         """
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(turns)")}
         if "task_type_confidence" not in cols:
@@ -416,6 +457,33 @@ class Store:
         with self.tx() as conn:
             conn.execute("DELETE FROM file_cursors")
 
+    # ---- quota check-ins --------------------------------------------------------
+
+    def add_quota_reading(self, weekly_pct: float, ts: str, source: str,
+                          recorded_at: str | None = None) -> int:
+        """Append one reading. Returns its rowid.
+
+        Validation lives in `dict8.usage.quota`, not here, so that every caller gets the
+        same bounds and the same message — but the column types still refuse anything
+        that is not a number.
+        """
+        with self.tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO quota_readings(weekly_pct, ts, source, recorded_at) "
+                "VALUES (?,?,?,?)",
+                (float(weekly_pct), ts, source, recorded_at or _now()),
+            )
+        return int(cur.lastrowid)
+
+    def latest_quota_reading(self) -> sqlite3.Row | None:
+        """The most recent reading by the time it was TAKEN, not by the time it was
+        written: a check-in typed in late is still a reading about the moment it names.
+        Ties break on id so a re-run is deterministic."""
+        return self.conn.execute(
+            "SELECT id, weekly_pct, ts, source, recorded_at FROM quota_readings "
+            "ORDER BY ts DESC, id DESC LIMIT 1"
+        ).fetchone()
+
     # ---- reads ------------------------------------------------------------------
 
     def totals(self, since: str | None = None, until: str | None = None) -> sqlite3.Row:
@@ -459,6 +527,6 @@ class Store:
 
     def count(self, table: str) -> int:
         if table not in {"messages", "turns", "turn_messages", "turn_prompts",
-                         "message_files", "file_cursors"}:
+                         "message_files", "file_cursors", "quota_readings"}:
             raise ValueError(f"unknown table {table!r}")
         return self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

@@ -1,4 +1,5 @@
 """`dict8` command line — Phase 1 surface: backfill, usage, tail, reconcile.
+Plus `quota`, the manual weekly check-in (Phase 2's calibration ground truth).
 Plus the classifier (prompts/classify.md), pulled forward from Phase 5 (Denis, 2026-09-15).
 
 Invariant 6: no USD figure is printed by any command. `claude-tokens` emits a
@@ -19,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dict8 import config as config_mod
+from dict8.usage import quota as quota_mod
 from dict8.usage.parser import read_prompt_text
 from dict8.usage.reader import scan
 from dict8.usage.store import TOKEN_COLUMNS, Store
@@ -241,6 +243,49 @@ def cmd_reconcile(args, cfg) -> int:
     return 0 if ok else 1
 
 
+def cmd_quota(args, cfg) -> int:
+    """Record or show the manual weekly-quota check-in.
+
+    The DB is the store of record, not `quota.last_reading` in config.yml: readings
+    accumulate, config holds decisions. `dict8 usage` deliberately says nothing about
+    quota — mixing a typed-in percentage into a table of counted tokens would blur which
+    figures were read and which were measured.
+    """
+    # `--at` says when a reading was taken, so it only means anything while recording one.
+    # Accepting it in read mode and ignoring it silently would answer a question the user
+    # did not ask (the current reading) as if it were the one they did (the reading as of
+    # that time) — a wrong answer wearing a right one's clothes.
+    if args.pct is None and args.at is not None:
+        print(f"quota: --at {args.at} only applies when recording a reading "
+              "(`dict8 quota <pct> --at ...`). `dict8 quota` always shows the latest "
+              "reading; there is no as-of lookup. Nothing was read or stored.",
+              file=sys.stderr)
+        return 2
+
+    with _open_store(cfg) as store:
+        now = datetime.now(timezone.utc)
+        if args.pct is not None:
+            try:
+                pct = quota_mod.parse_pct(args.pct)
+                taken_at = quota_mod.parse_taken_at(args.at, now)
+            except quota_mod.QuotaError as exc:
+                print(f"quota: {exc}", file=sys.stderr)
+                return 2
+            # source comes from config and is required, not defaulted here: if it were
+            # ever TBD, a row claiming "manual" would assert a provenance nobody chose.
+            reading = quota_mod.record(store, pct, str(cfg.require("quota.source")),
+                                       taken_at, now=now)
+            print(f"stored reading #{reading.row_id} in {store.path}\n")
+        else:
+            reading = quota_mod.latest(store)
+            if reading is None:
+                print(quota_mod.NO_READING)
+                return 0
+        for line in quota_mod.describe(reading, cfg.get("quota.stale_after_hours"), now):
+            print(line)
+    return 0
+
+
 def cmd_classify_backfill(args, cfg) -> int:
     """Classify every turn with no task_type yet.
 
@@ -325,6 +370,15 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--include-today", action="store_true",
                    help="include the still-being-written current day (expect drift)")
     r.set_defaults(func=cmd_reconcile)
+
+    q = sub.add_parser("quota", help="record or show the manual weekly-quota check-in")
+    q.add_argument("pct", nargs="?",
+                   help="weekly quota percent from Claude Code's /usage; omit to show the "
+                        "last reading with its source and age")
+    q.add_argument("--at", metavar="ISO8601",
+                   help="when the reading was taken, if not now (naive = this machine's "
+                        "local time). For a check-in typed in after the fact.")
+    q.set_defaults(func=cmd_quota)
 
     cb = sub.add_parser("classify-backfill", help="fill task_type on unclassified turns")
     cb.add_argument("--limit", type=int, help="classify at most N turns (oldest first)")

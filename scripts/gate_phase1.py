@@ -318,13 +318,25 @@ def main() -> int:
     )
 
     # -- self-check items that are cheap to assert --------------------------------
-    cols = [r[1] for r in store.conn.execute("PRAGMA table_info(turns)")]
-    mcols = [r[1] for r in store.conn.execute("PRAGMA table_info(messages)")]
-    bad = [c for c in cols + mcols if "usd" in c.lower() or "cost" in c.lower() or "text" in c.lower()]
+    # "anywhere in the schema" has to mean anywhere: this read `turns` and `messages` by
+    # name, so quota_readings (schema v4) landed outside the gate the moment it was added,
+    # and so would the next table. Enumerate sqlite_master instead — a new table is then
+    # covered on the day it appears, without anyone remembering to add it here.
+    banned = ("usd", "cost", "text")
+    tables = [r[0] for r in store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    scanned = {t: [r[1] for r in store.conn.execute(f'PRAGMA table_info("{t}")')]
+               for t in tables}
+    bad = [f"{t}.{c}" for t, cs in scanned.items() for c in cs
+           if any(k in c.lower() for k in banned)]
+    # An empty table list must FAIL, not vacuously pass: "no offending column found" in a
+    # database with no tables is the check measuring nothing and reporting success.
     record(
         "no USD column and no prompt-text column anywhere in the schema",
-        not bad,
-        f"turns={len(cols)} cols, messages={len(mcols)} cols; offending={bad or 'none'} "
+        bool(tables) and not bad,
+        f"scanned {len(tables)} tables / {sum(len(c) for c in scanned.values())} columns "
+        f"against {banned}: " + ", ".join(f"{t}({len(c)})" for t, c in scanned.items())
+        + f"; offending={bad or 'none'} "
         f"(privacy.store_transcripts={cfg.get('privacy.store_transcripts')!r})",
     )
 
