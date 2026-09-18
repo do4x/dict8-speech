@@ -66,3 +66,4 @@ A gate that cannot be made to fail on an empty measurement.
 | When | Unit | Round | Verdict | Gate numbers | Commit |
 |---|---|---|---|---|---|
 | 2026-09-18 23:05 | U1 | 1 | PASS, 4 caveats sent back (provenance phrase hardcoded, `--at` ignored in read mode, boundary rounding, USD gate covers 2 tables only) | quota stored/re-read/stale/reject all reproduced by verifier; gate_phase1 8/8; migration v3→v4 row counts unchanged | pending fix round |
+| 2026-09-18 23:20 | U1 | 2 | PASS — 4 caveats fixed, orchestrator re-ran: empty state exit 0, `--at` read-mode exit 2, verbatim rejection, quota_readings 0 rows, schema v4 | gate_phase1 8/8; check 8 scans 9 tables / 60 columns | a830f4a |
