@@ -21,6 +21,7 @@ Deriving them also makes every scan idempotent — re-running a backfill cannot 
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ from typing import Iterable, Iterator
 
 from dict8.usage.parser import AssistantMessage, Turn
 
-SCHEMA_VERSION = 5              # this file's own DDL revision, not a threshold
+SCHEMA_VERSION = 6              # this file's own DDL revision, not a threshold
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -190,6 +191,43 @@ CREATE TABLE IF NOT EXISTS hook_estimates (
 );
 CREATE INDEX IF NOT EXISTS idx_hook_estimates_ts      ON hook_estimates(ts);
 CREATE INDEX IF NOT EXISTS idx_hook_estimates_session ON hook_estimates(session_id);
+
+-- One row per dictation `dict8 app` delivered (schema v6, U6): the estimate shown on the
+-- overlay at release, and — once the next dictation starts or the session goes idle for
+-- meter.turn_idle_s — the tokens Claude Code actually spent after it. Phase 6's
+-- estimate-vs-actual, per dictation.
+--
+-- Numbers and fixed vocabularies only (privacy.store_transcripts: features_only):
+-- `bucket` is a classifier.buckets value, `recommended` / `override_model` are models[]
+-- ids, `est_group` is the estimator's population label, `close_reason` and `source` are
+-- fixed names. No prompt text, no USD (invariant 6).
+--
+-- `actual_tokens` is the deduped sum (messages.message_id is the PK, invariant 5) of every
+-- message in `session_id` with `dictated_at <= ts < closed_at`. NULL while open, and NULL
+-- when no Claude Code session was touched after the dictation (close_reason
+-- 'no_session'): a dictation into Slack cost nothing, and writing 0 would score as a
+-- wildly wrong estimate rather than as no turn at all.
+CREATE TABLE IF NOT EXISTS dictation_estimates (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source         TEXT NOT NULL,          -- hotkey | demo
+    dictated_at    TEXT NOT NULL,          -- ISO-8601 UTC, the release
+    words          INTEGER NOT NULL,       -- word count of what was injected
+    bucket         TEXT,                   -- classifier bucket; NULL = no chip
+    recommended    TEXT,                   -- models[].id; NULL = no recommendation
+    override_model TEXT,                   -- models[].id spoken as "use <model>"
+    method         TEXT,                   -- estimate.method; NULL until the estimate lands
+    est_group      TEXT,
+    n              INTEGER,
+    low            INTEGER,                -- NULL when the estimator refused
+    point          INTEGER,
+    high           INTEGER,
+    ood            INTEGER,
+    session_id     TEXT,                   -- Claude Code session the actual was read from
+    actual_tokens  INTEGER,                -- NULL until closed, or when no session followed
+    closed_at      TEXT,                   -- ISO-8601 UTC
+    close_reason   TEXT                    -- next_dictation | idle | no_session | shutdown
+);
+CREATE INDEX IF NOT EXISTS idx_dictation_estimates_at ON dictation_estimates(dictated_at);
 """
 
 TOKEN_COLUMNS = ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")
@@ -247,6 +285,11 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # Longest `tx()` block seen on this connection, in ms — an upper bound on how long
+        # this process held SQLite's write lock (the lock is taken at the first write inside
+        # the block and released at commit). The live meter reports it: the UserPromptSubmit
+        # hook shares this file and has a hooks.timeout_ms watchdog.
+        self.max_tx_ms = 0.0
         # WAL so the tail-reader can write while a reader (CLI, hook) queries.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -277,7 +320,8 @@ class Store:
         covers that case for anyone who ran the Phase 1 schema (v2) before v3 added the
         classifier columns.
 
-        v3 -> v4 adds `quota_readings`, and v4 -> v5 adds `hook_estimates`. Both are whole
+        v3 -> v4 adds `quota_readings`, v4 -> v5 adds `hook_estimates`, and v5 -> v6 adds
+        `dictation_estimates` (U6). All three are whole
         new tables rather than new columns, so they need no ALTER: `CREATE TABLE IF NOT
         EXISTS` in the DDL above has already run and an existing older database gains the
         empty table on open with every row it holds untouched. Nothing is dropped, renamed
@@ -308,12 +352,15 @@ class Store:
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
+        t0 = time.perf_counter()
         try:
             yield self.conn
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            self.max_tx_ms = max(self.max_tx_ms, (time.perf_counter() - t0) * 1000)
 
     # ---- writes -----------------------------------------------------------------
 
@@ -571,6 +618,55 @@ class Store:
             )
         return int(cur.lastrowid)
 
+    # ---- dictation estimates (U6) -----------------------------------------------
+
+    def open_dictation(self, *, source: str, dictated_at: str, words: int) -> int:
+        with self.tx() as conn:
+            cur = conn.execute(
+                "INSERT INTO dictation_estimates(source, dictated_at, words) VALUES (?,?,?)",
+                (source, dictated_at, int(words)))
+        return int(cur.lastrowid)
+
+    def set_dictation_estimate(self, row_id: int, *, bucket: str | None,
+                               recommended: str | None, override_model: str | None,
+                               method: str | None, est_group: str | None, n: int | None,
+                               low: int | None, point: int | None, high: int | None,
+                               ood: bool | None) -> None:
+        """Keyword-only for the same reason as `add_hook_estimate`: a transposed low/high
+        would store a backwards band nothing downstream could detect."""
+        with self.tx() as conn:
+            conn.execute(
+                "UPDATE dictation_estimates SET bucket=?, recommended=?, override_model=?, "
+                "method=?, est_group=?, n=?, low=?, point=?, high=?, ood=? WHERE id=?",
+                (bucket, recommended, override_model, method, est_group, n, low, point,
+                 high, None if ood is None else int(bool(ood)), int(row_id)))
+
+    def close_dictation(self, row_id: int, *, session_id: str | None,
+                        actual_tokens: int | None, closed_at: str, reason: str) -> None:
+        with self.tx() as conn:
+            conn.execute(
+                "UPDATE dictation_estimates SET session_id=?, actual_tokens=?, closed_at=?, "
+                "close_reason=? WHERE id=? AND closed_at IS NULL",
+                (session_id, actual_tokens, closed_at, reason, int(row_id)))
+
+    def session_tokens(self, session_id: str, *, since: str | None = None,
+                       until: str | None = None, max_rowid: int | None = None) -> int:
+        """Deduped token total of one session, optionally within [since, until) and up to
+        a rowid. Every row is one unique message_id (the PK), so this cannot double-count."""
+        where, params = ["session_id = ?"], [session_id]
+        if since is not None:
+            where.append("ts >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("ts < ?")
+            params.append(until)
+        if max_rowid is not None:
+            where.append("rowid <= ?")
+            params.append(int(max_rowid))
+        total = " + ".join(f"COALESCE(SUM({c}),0)" for c in TOKEN_COLUMNS)
+        return int(self.conn.execute(
+            f"SELECT {total} FROM messages WHERE {' AND '.join(where)}", params).fetchone()[0])
+
     # ---- reads ------------------------------------------------------------------
 
     def totals(self, since: str | None = None, until: str | None = None) -> sqlite3.Row:
@@ -592,7 +688,7 @@ class Store:
             params,
         ).fetchone()
 
-    def by_day(self, tz) -> list[dict]:
+    def by_day(self, tz, session_id: str | None = None) -> list[dict]:
         """Per-day totals in the given `tzinfo`.
 
         Bucketing happens in Python, not SQL: SQLite has no IANA tz database, and
@@ -601,10 +697,13 @@ class Store:
         the same fixed offset it hands the oracle.
         """
         buckets: dict[str, dict] = {}
-        for row in self.conn.execute(
-            "SELECT ts, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens "
-            "FROM messages"
-        ):
+        sql = ("SELECT ts, input_tokens, output_tokens, cache_creation_tokens, "
+               "cache_read_tokens FROM messages")
+        params: tuple = ()
+        if session_id is not None:
+            sql += " WHERE session_id = ?"
+            params = (session_id,)
+        for row in self.conn.execute(sql, params):
             day = datetime.fromisoformat(row["ts"]).astimezone(tz).date().isoformat()
             b = buckets.setdefault(day, {"messages": 0, **dict.fromkeys(TOKEN_COLUMNS, 0)})
             b["messages"] += 1
@@ -615,6 +714,6 @@ class Store:
     def count(self, table: str) -> int:
         if table not in {"messages", "turns", "turn_messages", "turn_prompts",
                          "message_files", "file_cursors", "quota_readings",
-                         "hook_estimates"}:
+                         "hook_estimates", "dictation_estimates"}:
             raise ValueError(f"unknown table {table!r}")
         return self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]

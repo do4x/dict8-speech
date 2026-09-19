@@ -418,7 +418,7 @@ def test_latency_row_refuses_a_text_field(cfg):
 
 def test_cli_and_hook_import_nothing_from_the_app_extra():
     heavy = ["AppKit", "Quartz", "AVFoundation", "objc", "sounddevice", "numpy", "mlx",
-             "mlx_whisper"]
+             "mlx_whisper", "mlx_lm"]
     code = ("import sys, dict8.cli, dict8.hooks.user_prompt_submit; "
             f"print([m for m in {heavy!r} if m in sys.modules])")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,

@@ -10,6 +10,11 @@ so there is nothing to bundle yet:
     D8 ⚠   something needs attention — the menu's first lines say what
     D8 ⎘   the last transcript is on the clipboard, not typed — press ⌘V (until next press)
 
+U6 appends the live meter to whichever title is showing: `D8 0.8M/3.0M` is tokens spent in
+the active Claude Code session since the last dictation, over that dictation's estimate high
+(`—` when the estimator refused). Tokens, never USD (invariant 6). The menu adds the session
+total, the last estimate range, and the quota burn rate or its labeled gap.
+
 Every method here must run on the main thread; `dict8.app` marshals through
 `PyObjCTools.AppHelper.callAfter`.
 """
@@ -70,6 +75,11 @@ class Tray:
         self.menu.addItem_(self.state_line)
         self.menu.addItem_(self.error_line)
         self.menu.addItem_(self.perm_line)
+        self.session_line = _info("Session: no Claude Code session seen yet")
+        self.since_line = _info("Since last dictation: no dictation yet")
+        self.burn_line = _info("Burn rate: not read yet")
+        for it in (self.session_line, self.since_line, self.burn_line):
+            self.menu.addItem_(it)
         self.menu.addItem_(_info(f"Talk key: {hotkey_label}"))
         self.menu.addItem_(_info(f"Mic: {mic_label}"))
         self.menu.addItem_(NSMenuItem.separatorItem())
@@ -80,15 +90,30 @@ class Tray:
             it.setTarget_(self.target)
             self.menu.addItem_(it)
         self.item.setMenu_(self.menu)
+        self.meter_suffix = ""
+        self.state = "loading"
         self.set_state("loading")
 
     @property
     def title(self) -> str:
         return str(self.item.button().title())
 
+    def _retitle(self) -> None:
+        title = TITLES[self.state]
+        self.item.button().setTitle_(f"{title} {self.meter_suffix}" if self.meter_suffix
+                                     else title)
+
     def set_state(self, state: str, detail: str = "") -> None:
-        self.item.button().setTitle_(TITLES[state])
+        self.state = state
+        self._retitle()
         self.state_line.setTitle_(f"State: {state}" + (f" — {detail}" if detail else ""))
+
+    def set_meter(self, suffix: str, session: str, since: str, burn: str) -> None:
+        self.meter_suffix = suffix
+        self._retitle()
+        self.session_line.setTitle_(session)
+        self.since_line.setTitle_(since)
+        self.burn_line.setTitle_(burn)
 
     def set_error(self, text: str) -> None:
         self.error_line.setTitle_(f"Last error: {text}")

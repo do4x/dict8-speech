@@ -62,8 +62,8 @@ from config or measured from the data — never a literal here:
      fires there — it is a real gate on a narrow bucket (quick-fix is 5-34) and close to a
      no-op on the pooled path. Do not read a pooled answer as "the length was checked";
   4. the named model has never been seen in the backfill at all. That checks the
-     **observed** models, not `config.models` — that list is still TBD, and a gap is not a
-     vocabulary.
+     **observed** models, not `config.models` — that list is the recommender's
+     provisional vocabulary (U6), not evidence that a model has history to estimate from.
 `estimate.refuse_when_out_of_distribution: false` relaxes conditions 3 and 4 into a warned
 extrapolation from the pooled group. It does not relax 1 or 2: a sample too small to have
 a band still has no band, and no flag can conjure one.

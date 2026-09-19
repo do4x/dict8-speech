@@ -79,7 +79,7 @@ def cmd_backfill(args, cfg) -> int:
 def cmd_usage(args, cfg) -> int:
     with _open_store(cfg) as store:
         tz = _tz_for(cfg)
-        rows = store.by_day(tz)
+        rows = store.by_day(tz, session_id=getattr(args, "session", None))
         if args.days:
             cutoff = (datetime.now(tz).date() - timedelta(days=args.days - 1)).isoformat()
             rows = [r for r in rows if r["day"] >= cutoff]
@@ -650,8 +650,11 @@ def cmd_app(args, cfg) -> int:
     except ImportError as exc:
         print(f"app: {APP_EXTRA} ({exc})", file=sys.stderr)
         return 1
+    if args.snapshot and not args.demo:
+        print("app: --snapshot needs --demo", file=sys.stderr)
+        return 2
     return app_mod.run(cfg, exit_after=args.exit_after, dry_run=args.dry_run,
-                       notify=not args.no_notify)
+                       notify=not args.no_notify, demo=args.demo, snapshot=args.snapshot)
 
 
 def cmd_dictate(args, cfg) -> int:
@@ -714,6 +717,8 @@ def main(argv: list[str] | None = None) -> int:
     u = sub.add_parser("usage", help="per-day token totals (never USD)")
     u.add_argument("--days", type=int, help="limit to the last N days")
     u.add_argument("--json", action="store_true")
+    u.add_argument("--session", metavar="SESSION_ID",
+                   help="only this Claude Code session's messages (deduped by message.id)")
     u.set_defaults(func=cmd_usage)
 
     t = sub.add_parser("tail", help="watch for new turns and record them incrementally")
@@ -781,6 +786,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="log talk-key events but never open the microphone")
     ap.add_argument("--no-notify", action="store_true",
                     help="toasts go to the terminal, the log and the menu only — no banner")
+    ap.add_argument("--demo", action="append", metavar="TEXT",
+                    help="run TEXT through the post-STT path (voice commands, overlay, "
+                         "classifier, estimate, meter row) with injection set to none; "
+                         "repeatable. Nothing is typed and no Return is posted")
+    ap.add_argument("--snapshot", metavar="PATH_PREFIX",
+                    help="with --demo: render the overlay to PATH_PREFIX-<n>.png after each "
+                         "chip (the panel's own pixels; no screen capture)")
     ap.set_defaults(func=cmd_app)
 
     dc = sub.add_parser("dictate", help="headless: WAV file -> STT -> inject (needs --extra app)")

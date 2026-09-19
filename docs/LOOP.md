@@ -63,8 +63,8 @@ A TCC permission click, spoken audio, any spend, or relaxing a CLAUDE.md invaria
 | U3 UserPromptSubmit hook | done | estimate as context on every prompt in this repo | see Log |
 | U4 debts | done | thresholds to config, optional mlx-lm, logging, 72 unit tests | see Log |
 | U5 dictation MVP | done | `dict8 app`: menu-bar item, hold-to-talk, record, mlx-whisper, inject with pasteboard fallback, permission toasts, latency log; `dict8 dictate --file` headless path; ADR-002 as one page | pytest green; `dictate --file` on `say` clips lands text byte-identical on the pasteboard; the app starts, shows its icon and names every missing permission; warm STT latency measured |
-| U6 overlay, advice, meter | in-progress | overlay panel on release: transcript status, recommended model (bucket to `models[]` lookup), estimate range; voice commands `send` / `cancel` / `use <model>` stripped and acted on; menu-bar meter of the session's live tokens against its estimate | pytest green; overlay renders with a fake transcript; meter matches `dict8 usage` for a finished session |
-| U7 real-task test | needs Denis | grant Microphone, Accessibility and Input Monitoring; dictate a real prompt into Claude Code; read the overlay; watch the meter | brief's "Done means" |
+| U6 overlay, advice, meter | done | overlay panel on release: transcript status, recommended model (bucket to `models[]` lookup), estimate range; voice commands `send` / `cancel` / `use <model>` stripped and acted on; menu-bar meter of the session's live tokens against its estimate | pytest green; overlay renders with a fake transcript; meter matches `dict8 usage` for a finished session |
+| U7 real-task test | needs Denis (next) | grant Microphone, Accessibility and Input Monitoring; dictate a real prompt into Claude Code; read the overlay; watch the meter | brief's "Done means" |
 | ~~U5 ADR-002 / U6 STT bench / U7 dictation code~~ | replaced 2026-09-19 | folded into the new U5 and U6 | — |
 
 ## Needs Denis

@@ -59,6 +59,23 @@ Claude Code version marks subagent turns inline with `isSidechain` instead. Obse
 on every assistant line in the sample: `false`. `true` has **not** been observed here, so any
 code path keyed on it is unverified and must say so.
 
+### 1.1 Subagent transcripts now exist — observed 2026-09-19 (U6), version `2.1.274`
+
+The paragraph above was true on 2026-09-15 and is no longer: this machine now has **11
+files** at `<encoded-cwd>/<session-uuid>/subagents/agent-*.jsonl`, all under one session
+(the build loop's own orchestrator session, which spawns subagents). Measured over every
+`assistant` line in them (1,266 lines, all `version: "2.1.274"`):
+
+- `sessionId` equals the **parent** session uuid (the directory above `subagents/`) on
+  1,266 / 1,266 lines — a subagent's spend is the parent session's spend;
+- `isSidechain` is `true` on 1,266 / 1,266 — so `true` is now observed, in these files only.
+
+Consequences, both already true of the code: the scanner's `rglob` picks these files up
+(no config change), and `dict8.usage.meter` reads a file's session from its own
+`messages.session_id` rows, falling back to the directory above `subagents/` only for a
+file with no assistant line yet. Dedup is unaffected (§5): a message.id replayed into a
+subagent file is still one row.
+
 Confirms `paths.claude_projects_glob` = `~/.claude/projects/*/*.jsonl`, but the tail-reader
 uses `rglob("*.jsonl")` so a future subagent subdirectory is picked up without a config change.
 

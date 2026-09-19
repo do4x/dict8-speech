@@ -178,8 +178,10 @@ class EventPoster:
     """CGEventPost adapter. Needs Accessibility; without it every post is a silent no-op,
     which is why the Injector checks the grant before choosing a posting path."""
 
-    # kVK_ANSI_V. The one keycode this module needs: Cmd+V for the paste fallback.
+    # kVK_ANSI_V: Cmd+V for the paste fallback. kVK_Return: the voice command `send` (U6).
+    # Virtual keycodes from HIToolbox Events.h — identifiers, not tunables.
     KEY_V = 9
+    KEY_RETURN = 36
 
     def __init__(self) -> None:
         import Quartz
@@ -202,6 +204,15 @@ class EventPoster:
             # No modifier may leak in from the physical keyboard (the talk key is Option).
             Q.CGEventSetFlags(ev, 0)
             Q.CGEventKeyboardSetUnicodeString(ev, n, chunk)
+            self._post(ev)
+
+    def key_return(self) -> None:
+        Q = self.Q
+        for down in (True, False):
+            ev = Q.CGEventCreateKeyboardEvent(None, self.KEY_RETURN, down)
+            if ev is None:
+                raise RuntimeError("CGEventCreateKeyboardEvent returned NULL")
+            Q.CGEventSetFlags(ev, 0)  # a held Option must not turn Return into Opt+Return
             self._post(ev)
 
     def cmd_v(self) -> None:
@@ -297,6 +308,21 @@ class Injector:
         return InjectResult(PATH_PB_ONLY, (time.perf_counter() - t0) * 1000, len(text),
                             toast=(why_title, f"{why_body} The transcript is on the "
                                               f"clipboard — press ⌘V."))
+
+    def submit(self) -> str | None:
+        """Post one Return — the voice command `send`. Returns None when posted, else why
+        not. Same pre-checks as `inject`: without Accessibility the post is a silent
+        no-op, and under Secure Input it would vanish, so neither is attempted."""
+        try:
+            if self.check_secure and self._secure():
+                return "Secure Input is on, so Return was not posted."
+            if not self._ax():
+                return "Accessibility is not granted, so Return was not posted."
+            self.poster.key_return()
+        except Exception as exc:
+            log.warning("inject: Return not posted (%r)", exc)
+            return f"Posting Return failed ({type(exc).__name__})."
+        return None
 
     def inject(self, raw: str, *, force: str | None = None) -> InjectResult:
         """Deliver `prepare(raw)`. `force` pins one path (`dictate --inject`)."""

@@ -25,6 +25,9 @@ classify = [
 # `uv run dict8 hook ...` on every prompt and imports none of this. Run the app with
 # `uv run --extra app dict8 app`.
 app = [
+    # U6: the app classifies each dictation on release for the model chip, so the app
+    # extra carries the classifier's. Without it the chip is simply absent (invariant 2).
+    "dict8[classify]",
     "pyobjc-framework-Cocoa>=11 ; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=11 ; sys_platform == 'darwin'",
     "pyobjc-framework-AVFoundation>=11 ; sys_platform == 'darwin'",

@@ -111,6 +111,11 @@ def scan(store: Store, root: Path, *, full: bool = False) -> ScanResult:
 
         store.set_cursor(str(path), final_offset, st.st_size, st.st_mtime)
 
-    store.refresh_turn_aggregates()
+    # Only when something was read. The refresh is a write transaction over every turn;
+    # the live meter scans every cli.tail_interval_s, and an idle tick has nothing to
+    # refresh — taking the write lock anyway would only contend with the UserPromptSubmit
+    # hook, which shares the file under a hooks.timeout_ms watchdog.
+    if full or result.files_read:
+        store.refresh_turn_aggregates()
     result.elapsed_s = time.monotonic() - started
     return result

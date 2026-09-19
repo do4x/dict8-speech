@@ -189,6 +189,7 @@ dependencies = [
 
 [package.optional-dependencies]
 app = [
+    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -208,6 +209,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dict8", extras = ["classify"], marker = "extra == 'app'" },
     { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'classify'", specifier = ">=0.28" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'app'", specifier = ">=0.4" },
     { name = "numpy", marker = "extra == 'app'", specifier = ">=2" },

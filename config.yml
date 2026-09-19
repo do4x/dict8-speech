@@ -317,7 +317,34 @@ classifier:
                                 # (`join(timeout=1.0)`, twice), unchanged.
 
 models:                         # user-editable; recommender may ONLY name entries from here
-  - { id: "TBD", label: "TBD", strength_line: "TBD" }
+                                # provisional (2026-09-19): docs/LOOP.md "Provisional defaults" —
+                                # the models Denis's own transcripts used, read off a scratch copy
+                                # of the store (`select model, count(*) from turns group by model`):
+                                # claude-opus-5 61 turns, claude-sonnet-5 30, claude-fable-5-1 21,
+                                # claude-haiku-4-5-20251001 5 (plus 2 `<synthetic>` + 1 null, not
+                                # models). `buckets:` is the whole bucket -> model mapping
+                                # (dict8/advise/recommend.py): a bucket no entry lists — today only
+                                # `unknown` — gets no recommendation, never a guess. A bucket listed
+                                # by two entries is a config error the recommender refuses.
+                                # Strength lines are capability only: no USD (invariant 6), and no
+                                # quota weighting, because nothing measured one yet.
+  - id: "claude-sonnet-5"       # provisional (2026-09-19): 30 turns in the store
+    label: "Sonnet 5"
+    strength_line: "quick and light — small, well-scoped edits"
+    buckets: ["quick-fix"]      # provisional (2026-09-19): LOOP.md mapping
+  - id: "claude-opus-5"         # provisional (2026-09-19): 61 turns, Denis's most-used model
+    label: "Opus 5"
+    strength_line: "strong all-round coder — debugging and multi-file features"
+    buckets: ["debug", "feature-build"]   # provisional (2026-09-19): LOOP.md mapping
+  - id: "claude-fable-5-1"      # provisional (2026-09-19): 21 turns in the store
+    label: "Fable 5.1"
+    strength_line: "deepest reasoning — design and long-horizon work"
+    buckets: ["architecture"]   # provisional (2026-09-19): LOOP.md mapping
+  - id: "claude-haiku-4-5-20251001"   # provisional (2026-09-19): 5 turns in the store
+    label: "Haiku 4.5"
+    strength_line: "fastest — simple, mechanical tasks"
+    buckets: []                 # provisional (2026-09-19): recommended for no bucket; present
+                                # so a spoken "use haiku" override names a model Denis has
 
 quota:
   source: "manual"              # no public API — user types weekly % after /usage
@@ -426,10 +453,49 @@ estimate:
                                 # off 5 turns trustworthy, and a fresh install's first estimates
                                 # will be far too narrow. Raise it if that lands badly in use.
 
-voice_commands:                 # matched post-transcription, exact-prefix, case-insensitive
-  send: ["send"]
-  override_model: ["use opus", "use sonnet", "use haiku"]
+voice_commands:                 # dict8/advise/voice.py. Matched post-transcription on WHOLE
+                                # SENTENCES, never on a prefix: "exact-prefix" (the seeded rule)
+                                # would have fired `send` on "send the email to Ana". A sentence
+                                # ends at . ! ? or a newline; matching lowercases it and turns every
+                                # run of non-alphanumerics into one space, so Whisper's "Send." and
+                                # "send!" match while "use opus-style naming" does not match "use
+                                # opus". Anything not matched is injected verbatim. A strip is
+                                # logged as the command name only, never the text.
+  send: ["send"]                # FINAL standalone sentence only ("... Send."). Stripped; the rest
+                                # is injected, then one Return is posted to submit. Never posted
+                                # when the text only reached the clipboard.
   cancel: ["cancel", "scratch that"]
+                                # the WHOLE utterance or its FINAL sentence. The dictation is
+                                # discarded, nothing injected (menu › Copy last transcript still
+                                # has it, in memory only).
+  override_model:               # LEADING standalone sentence only. Stripped, shown on the overlay
+                                # as the override and recorded; each value must be a models[].id.
+                                # provisional (2026-09-19): the three spoken names map to the
+                                # models[] entries of the same family.
+    "use opus": "claude-opus-5"
+    "use sonnet": "claude-sonnet-5"
+    "use haiku": "claude-haiku-4-5-20251001"
+  override_types_slash_command: false
+                                # provisional (2026-09-19): true would also type `/model <id>` +
+                                # Return into the target app before the text. OFF: it posts keys
+                                # into Claude Code that Denis did not dictate, and a wrong target
+                                # app would receive them — his call, not the loop's.
+
+overlay:                        # dict8/ui/overlay.py — the non-activating panel shown on release
+  dismiss_after_s: 5            # provisional (2026-09-19): long enough to read the chip and the
+                                # range once they land (~0.4-0.8 s after release, measured in U6),
+                                # short enough to be gone before the next dictation. Unmeasured
+                                # against Denis's reading; the panel never takes focus or clicks,
+                                # so erring long costs screen space, not input.
+
+meter:                          # the live meter in `dict8 app` (polls with cli.tail_interval_s)
+  turn_idle_s: 900              # provisional (2026-09-19): a dictation's estimate-vs-actual row is
+                                # closed when the next dictation starts, or after this long with no
+                                # new tokens in its session. MEASURED on a scratch copy of the
+                                # store, 119 turns: the longest gap between two assistant messages
+                                # inside one turn is p50 40 s, p90 207 s, p95 362 s, p99 859 s, max
+                                # 996 s. 900 s sits above p99, so an idle close truncates roughly
+                                # 1 turn in 100; shorter would under-report long agentic turns.
 
 privacy:
   audio_leaves_machine: false   # LOCKED
