@@ -165,6 +165,29 @@ usage_oracle:                   # cross-check tool — NOT a runtime dependency
   use: "Phase 1 reconciliation + periodic drift check. Never in the dictation path."
   ignore: "its USD cost columns — subscription, not API billing; our unit is quota %"
 
+cli:                            # defaults for `dict8` subcommand flags. Every one of these
+                                # was an argparse literal in dict8/cli.py until 2026-09-19
+                                # (U4); the value here IS that previous default, moved, not
+                                # re-chosen. A flag on the command line still overrides it.
+                                # Only `reconcile_tolerance_pct` has an external source.
+  tail_interval_s: 2.0          # `dict8 tail` poll interval. PREVIOUS HARDCODED DEFAULT
+                                # (`--interval`). Unmeasured and loose on purpose: nothing
+                                # in the latency budget runs through the tail, and
+                                # transcripts flush at turn boundaries (HANDOFF section 4.9),
+                                # so polling faster than a turn buys nothing. The Phase 1
+                                # gate's "within 5 s" is the only bound that exists on it.
+  reconcile_days: 7             # `dict8 reconcile` window, in settled days. PREVIOUS
+                                # HARDCODED DEFAULT (`--days`). Kept short deliberately:
+                                # both sides bucket days in a fixed offset derived from
+                                # usage_oracle.tz_env, so a DST change inside the window
+                                # would misbucket on the oracle's side.
+  reconcile_tolerance_pct: 0.5  # max per-column and total percent delta for `dict8
+                                # reconcile` to pass. PREVIOUS HARDCODED DEFAULT
+                                # (`--tolerance`) — and the only one of the three with a
+                                # source outside the code: prompts/build.md's Phase 1 gate
+                                # says the two readers must "agree within 0.5%", and a
+                                # larger gap is a parser bug rather than rounding.
+
 detect:                         # is this dictation a prompt for Claude Code, or plain text?
   mode: "heuristic_gates_classifier_resolves"
   signals:                      # ordered by cost; the frontmost-app check is nearly free
@@ -193,17 +216,44 @@ classifier:
                                 # Claude Code at all, and invariant 7 is local-only.
   model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
                                 # MEASURED on this machine (Apple M5) against
-                                # prompts/classify.evals.yml: 12/12 (gate is >=10/12),
-                                # warm latency 610-794ms. Real turns (2026-09-18): 69/82
-                                # classified at 598-799ms; the 13 omitted are all >=93
-                                # words (classified max 155), so the budget covers roughly
-                                # the first ~100 words. See dict8/advise/classifier.py docstring — the
-                                # margin against timeout_ms below is real but thin; the
-                                # client enforces the timeout itself and kills+replaces
-                                # its worker on overrun rather than trusting the model to
-                                # stay under it.
+                                # prompts/classify.evals.yml, 2026-09-19, after the prompt
+                                # was cut down to the bucket alone (U4): 11/12 (gate is
+                                # >=10/12), warm latency 320-388ms, median 334ms. The same
+                                # gate immediately before that change: 11/12 at 605-713ms,
+                                # median 636ms — so roughly half the budget came back, and
+                                # with it the coverage: on a scratch copy of the real store
+                                # the corpus went from 74/109 turns bucketed to 92/109, and
+                                # the longest prompt that fits the budget went from 155
+                                # words to 595. The one eval case that regressed ("use
+                                # opus" — a voice command, expected "unknown", now
+                                # "feature-build") is reproducible, not noise; see the
+                                # dict8/advise/classifier.py docstring for the trade.
+                                # The margin against timeout_ms below is no longer thin,
+                                # but the client still enforces the timeout itself and
+                                # kills+replaces its worker on overrun rather than trusting
+                                # the model to stay under it.
   timeout_ms: 800               # exceeded => "no recommendation"; NEVER blocks the send
   on_error: "omit"
+  max_output_tokens: 80         # generation cap for one classification. NOT measured —
+                                # this is the literal that was hardcoded in
+                                # dict8/advise/classifier.py as `generate(..., max_tokens=80)`
+                                # until 2026-09-19 (U4), moved here unchanged per invariant 3.
+                                # It is a ceiling, not a target: the model emits the bucket
+                                # object and stops on EOS well before it. Raising it cannot
+                                # make a call faster; lowering it below the object's length
+                                # would truncate the JSON and the client would log an
+                                # unparseable-output omit.
+  load_timeout_ms: 30000        # how long the parent waits for the worker to report the
+                                # model loaded before giving up and killing it. PREVIOUS
+                                # HARDCODED DEFAULT (`_spawn(load_timeout_s=30.0)`), same
+                                # value, expressed in ms like every other budget in this
+                                # file. Not a latency budget — a cold load is 1.0-2.3 s
+                                # measured (HANDOFF section 5); this is the "the child is
+                                # wedged, stop waiting" catcher, ~13x the worst load seen.
+  worker_join_timeout_ms: 1000  # how long `_kill()` waits for a terminated worker to
+                                # actually exit before escalating SIGTERM -> SIGKILL, and
+                                # again after the kill. PREVIOUS HARDCODED DEFAULT
+                                # (`join(timeout=1.0)`, twice), unchanged.
 
 models:                         # user-editable; recommender may ONLY name entries from here
   - { id: "TBD", label: "TBD", strength_line: "TBD" }
@@ -213,6 +263,16 @@ quota:
   checkin_cadence: "TBD"
   last_reading: null
   stale_after_hours: "TBD"      # past this, show staleness instead of a burn-rate warning
+  min_rate_span_hours: 0.05     # two check-ins closer together than this are too close to
+                                # divide by: no burn rate, and the reason is printed.
+                                # PREVIOUS HARDCODED DEFAULT, expressed as a number instead
+                                # of as a formatting side effect — the guard in
+                                # dict8/hooks/user_prompt_submit.py was
+                                # `f"{span_h:.1f}" == "0.0"`, i.e. exactly "span < 0.05 h"
+                                # (3 minutes), tied to the precision the line happens to
+                                # print at. Same behaviour, now a number a reader can see
+                                # and Denis can change. NOT measured: no pair of real
+                                # readings exists yet (quota_readings is empty).
 
 estimate:
   # Every number in this block is from ONE run: `uv run dict8 estimate --eval`,

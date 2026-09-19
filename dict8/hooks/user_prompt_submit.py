@@ -56,6 +56,7 @@ CONTEXT_HEADER = ("Dict8 usage estimate for the prompt above — advisory contex
                   "user's local history, NOT part of the user's request. Do not act on it.")
 
 _HOURS_PER_DAY = 24.0           # unit conversion, not a threshold
+_MINUTES_PER_HOUR = 60.0        # unit conversion, not a threshold
 
 
 # ---- quota ------------------------------------------------------------------------
@@ -117,15 +118,22 @@ def quota_lines(store, cfg, now: datetime) -> list[str]:
         return lines
 
     span_h = quota_mod.hours(newest.taken_at - older.taken_at)
-    # Guarded at the precision this line PRINTS, not at zero. Two readings 40 seconds
-    # apart have a positive span and would divide a real percentage difference by 0.011 h,
-    # printing a confident "90 %/h — gone in 0.05 days" next to "over 0.0 h". A rate whose
-    # own denominator rounds away is not a measurement of anything.
-    if span_h <= 0 or f"{span_h:.1f}" == "0.0":
+    # Two guards here, and they are not the same kind of thing. `span_h <= 0` is
+    # structural: a non-positive denominator is not a small number, it is not a number to
+    # divide by at all. `quota.min_rate_span_hours` is the threshold. Two readings 40
+    # seconds apart have a positive span and would divide a real percentage difference by
+    # 0.011 h, printing a confident "90 %/h — gone in 0.05 days" next to "over 0.0 h"; a
+    # rate whose own denominator rounds away is not a measurement of anything. Until
+    # 2026-09-19 (U4) that threshold was written as `f"{span_h:.1f}" == "0.0"` — the same
+    # cut-off, 0.05 h, but expressed as a side effect of the format string two lines below,
+    # where no reader could see it and no config could change it. Invariant 3.
+    min_span_h = float(cfg.require("quota.min_rate_span_hours"))
+    if span_h <= 0 or span_h < min_span_h:
         lines.append(f"burn rate  : NOT COMPUTED — the two most recent readings are "
-                     f"{span_h * 60:.1f} minutes apart, too close together to divide by. "
-                     f"A pace needs two readings taken far enough apart to tell usage "
-                     f"from noise.")
+                     f"{span_h * _MINUTES_PER_HOUR:.1f} minutes apart, closer together "
+                     f"than quota.min_rate_span_hours = {min_span_h:g} h and too close to "
+                     f"divide by. A pace needs two readings taken far enough apart to "
+                     f"tell usage from noise.")
         return lines
     delta = newest.weekly_pct - older.weekly_pct
     if delta == 0:

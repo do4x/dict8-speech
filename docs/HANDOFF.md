@@ -17,10 +17,27 @@ re-run) or **[unverified]**. Check me in two minutes:
 
 ```sh
 cd /Users/doax/Projects/Dict8
+uv run pytest                                      # hermetic unit tests; expect 72 passed, <1 s
 uv run --quiet python scripts/gate_phase1.py       # expect 8/8; reads the real ~/.claude/projects
-uv run --quiet python scripts/gate_classifier.py   # expect >=10/12; latency ~600-800ms
+uv run --quiet python scripts/gate_phase2.py       # expect 5/5 (hook); add --live to spend
 uv run --quiet dict8 usage --days 7                # per-day token table, never USD
+uv run --extra classify --quiet python scripts/gate_classifier.py   # >=10/12; ~320-390ms
+uv run --extra classify dict8 classify-backfill    # fill task_type on unclassified turns
 ```
+
+**`--extra classify` is needed on the last two.** Since 2026-09-19 `mlx-lm` is an optional
+extra rather than a base dependency, so a fresh checkout's headless layer (usage, quota,
+estimate, hook) installs 2 packages instead of 35. `uv run --extra classify …` installs it;
+plain `uv run` does not.
+
+What plain `uv run` does *not* do is remove it again. Measured 2026-09-19: after one
+`uv run --extra classify …`, `find_spec("mlx_lm")` still succeeds under plain `uv run`, and
+the project env still lists 38 packages. Only an explicit `uv sync` prunes back to the
+7-package base (2 runtime + the `dev` group). So on a machine that has already run the
+classifier, omitting the flag may appear to work; on a fresh checkout, or after `uv sync`,
+it will not. Both commands check for the backend and refuse with the exact command to run,
+rather than half-working either way. Everything else, including the registered
+`UserPromptSubmit` hook, runs on the base environment by design.
 
 A *new Claude Code version* appearing in the transcripts fails gate check 1 by design (that is
 how 2.1.274 was caught today). Re-verify the schema against real files, then document the
@@ -93,18 +110,22 @@ regenerable: `uv run dict8 backfill && uv run dict8 classify-backfill`.
 - Resident mlx-lm worker **subprocess**. `classify()` returns `ClassifyResult` or `None` (fail-open, logged); a timeout kills and replaces the worker.
 - **Why a subprocess:** the first version used a thread pool that cannot cancel. After one overrun every later call queued behind it and timed out — 164 of 164 in a row. A permanent wedge, indistinguishable from a healthy feature doing nothing.
 - **Prompt shape:** `classify.md` minus its last line as the system message, `Input: "<text>"` as the user message, assistant prefilled with `{"bucket":`. Prefill still works on Haiku 4.5 and Qwen; it is rejected on Fable 5/5.1, Opus 5, Sonnet 5 and the 4.6–4.8 family (per the claude-api skill), so a move to those needs structured outputs.
-- **Eval gate:** 12/12 [run 09-15, twice], 11/12 [run 09-18] — the miss was a first call timing out while model load took 2.3 s (usually 1.0–1.2 s), i.e. transient load. Latency 598–799 ms against `timeout_ms: 800`: **margin is 0–170 ms.** A fresh worker's first call is normal (673–722 ms), so this is not a cold-start defect.
-- **Coverage gap [run 09-18]:** 69 of 82 turns classified. All 13 omitted are ≥ 93 words (median 361, max 4028); all classified are ≤ 155 words (median 16). The ~450-token static preamble is prefilled on every call, so the budget covers roughly the first ~100 words. **Long, detailed prompts — where a bucket matters most — get none.** A second pass omitted the same 13 (not restart noise).
+- **Output is the bucket alone since 09-19** (U4). `confidence` and `why` were dropped from `classify.md`: nothing consumed either, build.md Phase 5 says "a bucket only", and every token of them was generated serially inside the 800 ms budget.
+- **Eval gate:** 12/12 [run 09-15, twice], 11/12 [run 09-18], **11/12 [run 09-19, twice, after the cut]**. Latency collapsed with the output: **320–388 ms, median 334** [run 09-19] against 605–713 ms on the same gate minutes earlier. The margin against `timeout_ms: 800` was 0–170 ms and is now ~400 ms.
+- **The 09-19 miss is a real one, not a timeout.** `"use opus"` (expected `unknown`, the voice-command case) now returns `feature-build`, reproducibly on two runs. The `confidence` field was apparently carrying some of the abstention behaviour that the `"unknown"` rule now has to carry alone. Still clears the gate; worth a prompt-rules fix before Phase 5 leans on it.
+- **Coverage gap, mostly closed [run 09-19].** On a scratch copy of the real store: 74 of 109 turns bucketed before, **92 of 109 after**, and the longest prompt that fits the budget went from **155 words to 595**. The old line — "the budget covers roughly the first ~100 words" — now reads roughly the first ~600. The 17 still omitted are 674–4028 words (plus one 21-word turn whose source line no longer parses as a prompt). The long, detailed prompts that used to get nothing now mostly get a bucket.
+- **Historical [run 09-18], for comparison:** 69 of 82 turns classified at 598–799 ms; all 13 omitted ≥ 93 words (median 361, max 4028), all classified ≤ 155 (median 16). A second pass omitted the same 13 (not restart noise).
+- `turns.task_type_confidence` **is kept and written NULL.** Rows classified before 09-19 keep their values; nothing reads the column either way.
 - **Labels are model output, not ground truth.** No labeled real turns exist; accuracy on real text is unmeasured. It was also run on *typed* history, while `classify.md` is written for speech-to-text output. Buckets: unknown 29 (34%, many `[Request interrupted by user]` and one-word turns), debug 15, quick-fix 15, feature-build 10, architecture 0. Median total tokens: unknown 657K, quick-fix 832K, debug 1.47M, feature-build 2.87M — ordered as hoped, but the interquartile ranges overlap heavily and n is 10–28 per bucket. My first report of a "10× spread" was small-n noise; it is ~4×.
-- **Untested levers** (arithmetic, not measurement): drop the `why`/`confidence` output (nothing consumes them; build.md says "bucket only"); reuse the KV cache for the static preamble; raise `timeout_ms`; smaller model.
+- **Levers:** dropping `why`/`confidence` was the big one and is now spent (above, measured). Still untested: reuse the KV cache for the static preamble; raise `timeout_ms`; smaller model.
 
 ## 6. Debts
 
-- **Invariant 3 (no thresholds in code) is violated in small ways:** `classifier.py` `max_tokens=80`, `load_timeout_s=30.0`, join timeouts `1.0`; `cli.py` defaults `--interval 2.0`, `--tolerance 0.5`, `--days 7`; regexes and the Skill-preamble string in the parser. build.md's self-check ("grep finds no hardcoded ones") was run for paths and models on 09-15, not for thresholds, and not since the classifier landed.
-- `pyproject.toml` makes `mlx-lm` a hard dependency of the whole package, so even the headless usage layer installs it on first `uv run`. Make it an optional extra if that layer should stay light.
-- No unit tests. The two gates are the tests.
-- Warnings go to stderr; nothing writes to `paths.logs`. `dict8 tail` polls every 2 s; no daemon or launchd.
-- **26 config TBDs** (`uv run python -c "from dict8 import config; print(config.load().gaps())"`). Need Denis: `hotkey.*` (4), `enhance.default`, `models[]` (the recommender's entire vocabulary), `quota.checkin_cadence` / `stale_after_hours`, `packaging.*`, `privacy.transcript_retention`. Need measurement: `stt.*`, `hardware.mic_device`, `injection.*`, `detect.uncertain_band`. Need a build: `paths.claude_settings`, `enhance.model`.
+- ~~**Invariant 3 (no thresholds in code)**~~ **PAID 2026-09-19 (U4).** `classifier.max_output_tokens`, `classifier.load_timeout_ms`, `classifier.worker_join_timeout_ms`, `cli.tail_interval_s`, `cli.reconcile_days`, `cli.reconcile_tolerance_pct`, `quota.min_rate_span_hours` (which had been hiding as `f"{span_h:.1f}" == "0.0"`). Each carries a comment saying where its value came from; all seven are the previous literal, none is measured, none is a new TBD. **The parser's regexes and the Skill-preamble string deliberately stay in code** — they are schema, not preference: they describe content Claude Code injects, pinned in `docs/verified-schemas.md` §6, and a wrong value there silently readmits a 108 KB Skill dump into the estimator's training data. They change when the schema is re-verified, not when a config is edited. A comment at the definition says so.
+- ~~`pyproject.toml` makes `mlx-lm` a hard dependency~~ **PAID 2026-09-19 (U4).** It is the optional `classify` extra. Base install: **35 packages / 326 MB → 2 packages / 964 KB**, warm-cache install 0.25 s → 0.17 s. `uv run --extra classify …` for `classify-backfill` and `gate_classifier.py`; the registered hook keeps working on the base env.
+- ~~No unit tests~~ **PAID 2026-09-19 (U4).** `tests/`, 72 tests, 0.21 s, hermetic (scratch DB per test, synthetic fixtures, no `~`, no network, no model). Covers dedup by `message.id`, turn assembly, `is_human_prompt`, the decomposed token fields, and the hook's fail-open on 13 hostile stdins. Every rule was mutation-checked: breaking it in the source turns the test red.
+- ~~Warnings go to stderr; nothing writes to `paths.logs`~~ **PAID 2026-09-19 (U4).** `dict8.logs.setup()` puts WARNING and up in `paths.logs/dict8.log` (created on first use) and leaves only ERROR on stderr; the CLI's `print()` summaries are untouched. `hooks.log` stays separate and non-blocking on purpose — see `dict8.hooks`. `dict8 tail` still polls (now `cli.tail_interval_s`); no daemon or launchd.
+- **25 config TBDs** (`uv run python -c "from dict8 import config; print(config.load().gaps())"`). Need Denis: `hotkey.*` (4), `enhance.default`, `models[]` (the recommender's entire vocabulary), `quota.checkin_cadence` / `stale_after_hours`, `packaging.*`, `privacy.transcript_retention`. Need measurement: `stt.*`, `hardware.mic_device`, `injection.*`, `detect.uncertain_band`. Need a build: `enhance.model`. (`paths.claude_settings` was filled by U3, 2026-09-18.)
 - `files-dict8-mac/` is a stale parallel copy of the spec, merged forward and kept as-is. Root `CLAUDE.md`, `config.yml`, `prompts/` are authoritative; safe to delete once the new prompt lands.
 
 ## 7. What ports if the architecture changes

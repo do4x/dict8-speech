@@ -31,7 +31,16 @@ TYPE_USER = "user"
 
 @dataclass(frozen=True, slots=True)
 class AssistantMessage:
-    """One usage-bearing assistant line. Identity is `message_id` (§5)."""
+    """One usage-bearing assistant line. Identity is `message_id` (§5).
+
+    `ts`, `src_file` and `src_line` are carried in that order because they are the dedup
+    tie-break: among copies of one `message_id`, the winner is the earliest timestamp, then
+    the source path, then the line. The comparison itself lives in ONE place —
+    `Store.upsert_messages`' row-value `WHERE` clause — because that is where the incumbent
+    row is available to compare against. There is deliberately no Python mirror of it: a
+    second copy of an ordering rule is a second thing to keep in sync, and this parser never
+    sees two copies of an id at once anyway.
+    """
 
     message_id: str
     session_id: str
@@ -60,22 +69,14 @@ class AssistantMessage:
             + self.cache_read_tokens
         )
 
-    @property
-    def dedup_order(self) -> tuple:
-        """Deterministic winner among duplicates: earliest timestamp, then file, then line.
-
-        The reference implementation keeps whichever copy `rglob` reaches first, which makes
-        per-project attribution of a cross-project duplicate vary between runs (§5). Ordering
-        explicitly makes a backfill reproducible.
-        """
-        return (self.ts, self.src_file, self.src_line)
-
 
 @dataclass(frozen=True, slots=True)
 class HumanPrompt:
     """A prompt a person actually typed or dictated — not a tool_result (§6).
 
-    Carries no text: see module docstring.
+    Carries no text: see module docstring. `ts`/`src_file`/`src_line` are the same dedup
+    tie-break as `AssistantMessage`, applied by `Store.upsert_turns` — 6 of 409 prompt uuids
+    on this machine appear in more than one file.
     """
 
     uuid: str
@@ -87,10 +88,6 @@ class HumanPrompt:
     words: int
     src_file: str
     src_line: int
-
-    @property
-    def dedup_order(self) -> tuple:
-        return (self.ts, self.src_file, self.src_line)
 
 
 @dataclass
@@ -208,6 +205,16 @@ def _tool_use_paths(content: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found))
 
 
+# SCHEMA, NOT CONFIGURATION — deliberately in code, and staying there (checked in U4,
+# 2026-09-19, against invariant 3). These three do not describe a preference Denis could
+# hold a different opinion about; they describe the literal shape of content Claude Code
+# injects onto a user-role line, observed on this machine and pinned in
+# docs/verified-schemas.md section 6 ("message object (user) — turn assembly", the
+# CORRECTION block). Moving them to config.yml would invite someone to "tune" them, and a
+# wrong value here does not degrade an advisory layer: it silently readmits a 108,386-char
+# Skill dump into the estimator's training data as if a person had dictated it. They
+# change when the schema is re-verified against real files, in the same commit as the
+# section 6 update — not when a config is edited.
 _SYNTHETIC_TAG_RE = re.compile(r"<([a-zA-Z][a-zA-Z_-]*)>.*?</\1>", re.DOTALL)
 _IMAGE_PLACEHOLDER_RE = re.compile(r"\[Image:[^\]]*\]")
 _SKILL_PREAMBLE_PREFIX = "Base directory for this skill:"

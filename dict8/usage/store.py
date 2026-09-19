@@ -28,7 +28,7 @@ from typing import Iterable, Iterator
 
 from dict8.usage.parser import AssistantMessage, Turn
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 5              # this file's own DDL revision, not a threshold
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS turns (
     prompt_words          INTEGER NOT NULL,       -- summed over every prompt in the turn
     prompt_count          INTEGER NOT NULL DEFAULT 1,
     task_type             TEXT,                   -- classifier bucket, or null if unclassified
+    -- KEPT, WRITTEN NULL since 2026-09-19 (U4). prompts/classify.md no longer asks the
+    -- model for a confidence: nothing read it, and the tokens came out of an 800 ms
+    -- budget. The column is not dropped because null reads as "not reported" while a 0.0
+    -- would read as "certain it had no idea", and dropping it would rewrite the table.
     task_type_confidence  REAL,                   -- classifier's own confidence, 0-1
     task_type_source      TEXT,                   -- classifier.model that produced it
     -- derived by refresh_turn_aggregates(), never written directly:
@@ -316,10 +320,19 @@ class Store:
     def upsert_messages(self, messages: Iterable[AssistantMessage]) -> int:
         """Insert messages, keeping the deterministic winner among duplicates.
 
-        The row-value comparison implements `dedup_order` — earliest timestamp, then source
-        file, then line. Without it the surviving copy depends on filesystem iteration order
-        and a re-run can reattribute a cross-project duplicate to a different project (§5).
-        An identical re-read of the same line is allowed through so a re-scan is idempotent.
+        **This row-value comparison is the dedup ordering — the only copy of it.** The
+        winner among copies of one `message_id` is the earliest timestamp, then the source
+        file, then the line. Without it the surviving copy depends on filesystem iteration
+        order and a re-run can reattribute a cross-project duplicate to a different project
+        (§5) — which is exactly what the reference implementation does, keeping whichever
+        copy `rglob` reaches first. An identical re-read of the same line is allowed through
+        so a re-scan is idempotent.
+
+        `dict8.usage.parser` used to carry a `dedup_order` property spelling the same tuple.
+        It was deleted on 2026-09-19 (U4) because nothing called it: mutating it left the
+        whole suite green, which is the definition of a rule that is not being enforced
+        where it is written. The tests that guard the ordering
+        (`tests/test_dedup.py`) exercise it through this clause.
         """
         messages = list(messages)
         if not messages:
@@ -439,7 +452,13 @@ class Store:
                 linked += cur.rowcount
         return linked
 
-    def set_task_type(self, prompt_uuid: str, bucket: str, confidence: float, source: str) -> None:
+    def set_task_type(self, prompt_uuid: str, bucket: str, source: str,
+                      confidence: float | None = None) -> None:
+        """Write a turn's classifier bucket. `confidence` is NULL for every classifier
+        shipped since 2026-09-19 (U4) — `prompts/classify.md` stopped asking for one
+        because nothing read it (see dict8.advise.classifier.ClassifyResult). The column
+        stays: a null says "this classifier did not report one", which a 0.0 would not.
+        """
         with self.tx() as conn:
             conn.execute(
                 "UPDATE turns SET task_type=?, task_type_confidence=?, task_type_source=? "

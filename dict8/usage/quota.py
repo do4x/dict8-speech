@@ -25,6 +25,9 @@ from datetime import datetime, timedelta, timezone
 # The domain of a percentage, not a tunable threshold. Invariant 3 is about decisions that
 # are Denis's to make; "a percent runs 0 to 100" is not one of them, and putting it in
 # config.yml would invite someone to widen it and quietly break the unit.
+# The bounds of a percentage, not a tunable range: /usage reports 0-100 and a reading
+# outside it is a typo, not a policy question. Units, in the same sense as the
+# conversions below.
 PCT_MIN = 0.0
 PCT_MAX = 100.0
 
@@ -43,7 +46,7 @@ MANUAL_SOURCE = "manual"
 
 _MAX_HOUR_PLACES = 6            # display precision ceiling, not a threshold
 
-LABEL_WIDTH = 14
+LABEL_WIDTH = 14               # column width for the aligned output, not a threshold
 
 
 class QuotaError(ValueError):

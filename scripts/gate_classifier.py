@@ -1,7 +1,15 @@
-#!/usr/bin/env -S uv run --quiet --with mlx-lm --with pyyaml python
+#!/usr/bin/env -S uv run --extra classify --quiet python
 """Classifier gate: the real eval set, run for real, against the real local model.
 
 Ship gate per prompts/classify.evals.yml: >=10/12.
+
+    uv run --extra classify --quiet python scripts/gate_classifier.py
+
+**`--extra classify` is required** since 2026-09-19 (U4): `mlx-lm` moved out of the base
+dependencies into an optional extra so the headless layer installs light (2 packages
+instead of 35), and `uv run` syncs the environment to the lock on every invocation — so
+without the flag the model backend is not in the env that runs. This script says so and
+exits 2 rather than letting that surface as a worker failing to load.
 """
 
 from __future__ import annotations
@@ -15,13 +23,21 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dict8 import config as config_mod
-from dict8.advise.classifier import Classifier
+from dict8.advise.classifier import Classifier, backend_available
 
 REPO = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
     cfg = config_mod.load()
+
+    if not backend_available():
+        print("gate_classifier: mlx-lm is not in this environment. It is the optional "
+              "`classify` extra — re-run as:\n"
+              "  uv run --extra classify --quiet python scripts/gate_classifier.py\n"
+              "Nothing was measured, so nothing is claimed.", file=sys.stderr)
+        return 2
+
     cases = yaml.safe_load((REPO / "prompts" / "classify.evals.yml").read_text())
 
     clf = Classifier(cfg)

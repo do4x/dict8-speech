@@ -7,3 +7,6 @@ bench/results.json
 __pycache__/
 *.pyc
 .venv/
+
+# pytest scratch
+.pytest_cache/

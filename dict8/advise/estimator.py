@@ -609,7 +609,10 @@ def sweep_pooling(rows: Sequence[TurnRow], gate: Gate,
     has to get before its own distribution is worse than pooling every turn together.
     The refusal floor is pinned low throughout so that raising this one only ever swaps
     a bucket band for the pooled band; it never turns an answer into a refusal, and the
-    two effects stay separable."""
+    two effects stay separable. The literal 1 below is that pin — an experiment control
+    inside `--eval`, not a shipped threshold: the floor that ships is
+    `estimate.ood_min_bucket_samples`, read from config by `Gate.from_config`, and this
+    function never touches it outside the sweep it is describing."""
     return [(f, leave_one_out(rows, replace(gate, min_bucket=f, ood_min_bucket=1),
                               QuantileEstimator))
             for f in floors]

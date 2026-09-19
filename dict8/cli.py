@@ -20,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dict8 import config as config_mod
+from dict8 import logs
 from dict8.usage import quota as quota_mod
 from dict8.usage.parser import read_prompt_text
 from dict8.usage.reader import scan
@@ -117,7 +118,9 @@ def cmd_usage(args, cfg) -> int:
 
 def cmd_tail(args, cfg) -> int:
     root = Path(args.root).expanduser() if args.root else _projects_root(cfg)
-    interval = args.interval
+    # `--interval` overrides; the default lives in config.yml, not in argparse (invariant 3).
+    interval = (args.interval if args.interval is not None
+                else float(cfg.require("cli.tail_interval_s")))
     with _open_store(cfg) as store:
         if args.once:
             result = scan(store, root)
@@ -142,6 +145,12 @@ def cmd_reconcile(args, cfg) -> int:
     """Gate check: our backfill vs the `claude-tokens` oracle, same window, side by side."""
     iana = str(cfg.require("usage_oracle.tz_env"))
     tz = ZoneInfo(iana)
+    # Both windows come from config.yml unless a flag says otherwise (invariant 3):
+    # `cli.reconcile_days` and `cli.reconcile_tolerance_pct`, the latter being
+    # prompts/build.md's Phase 1 gate figure rather than a number chosen here.
+    days_window = args.days if args.days is not None else int(cfg.require("cli.reconcile_days"))
+    tolerance = (args.tolerance if args.tolerance is not None
+                 else float(cfg.require("cli.reconcile_tolerance_pct")))
 
     # claude-tokens 0.2.1 has no IANA tz database — parse_tz() accepts only UTC,
     # Asia/Shanghai, or a fixed +N/-N offset. `Europe/Bucharest` is rejected outright, so
@@ -149,7 +158,7 @@ def cmd_reconcile(args, cfg) -> int:
     # therefore bucketed with the *same fixed offset*, derived from the real zone at the
     # start of the window, which keeps the comparison honest. A window spanning a DST
     # change would misbucket on the oracle's side; --days is kept short for that reason.
-    anchor = datetime.now(tz) - timedelta(days=args.days - 1)
+    anchor = datetime.now(tz) - timedelta(days=days_window - 1)
     offset = anchor.utcoffset() or timedelta(0)
     hours = int(offset.total_seconds() // 3600)
     minutes = int((offset.total_seconds() % 3600) // 60)
@@ -164,7 +173,7 @@ def cmd_reconcile(args, cfg) -> int:
     date_to = datetime.now(fixed).date()
     if not args.include_today:
         date_to -= timedelta(days=1)
-    date_from = date_to - timedelta(days=args.days - 1)
+    date_from = date_to - timedelta(days=days_window - 1)
 
     env = {**os.environ, "CLAUDE_TOKENS_TZ": oracle_tz}
     cmd = ["claude-tokens", "--json", "--group", "day",
@@ -218,7 +227,7 @@ def cmd_reconcile(args, cfg) -> int:
         if ot or dt:
             delta = abs(dt - ot) / max(ot, 1) * 100
             worst = max(worst, delta)
-            flag = "" if delta <= args.tolerance else "   <-- OVER TOLERANCE"
+            flag = "" if delta <= tolerance else "   <-- OVER TOLERANCE"
             print(f"{'':<12} {'delta':<8}{delta:>14.3f}%{flag}")
     print("-" * len(header))
 
@@ -230,15 +239,16 @@ def cmd_reconcile(args, cfg) -> int:
     for k in ORACLE_COLUMNS:
         ov, dv = sums["oracle"][k], sums["dict8"][k]
         delta = abs(dv - ov) / max(ov, 1) * 100
-        status = "ok" if delta <= args.tolerance else "FAIL"
+        status = "ok" if delta <= tolerance else "FAIL"
         if status == "FAIL":
             per_col_ok = False
         print(f"  {k:<22} oracle={_fmt(ov):>14}  dict8={_fmt(dv):>14}  delta={delta:6.3f}%  {status}")
 
     total_delta = abs(d_tot - o_tot) / max(o_tot, 1) * 100
     print(f"\nworst per-day delta : {worst:.3f}%")
-    print(f"window total delta  : {total_delta:.3f}%  (tolerance {args.tolerance}%)")
-    ok = per_col_ok and total_delta <= args.tolerance
+    print(f"window total delta  : {total_delta:.3f}%  "
+          f"(tolerance {tolerance}%, cli.reconcile_tolerance_pct)")
+    ok = per_col_ok and total_delta <= tolerance
     print("RECONCILE: " + ("PASS" if ok else "FAIL — a gap this size is a parser bug, not rounding"))
     return 0 if ok else 1
 
@@ -472,6 +482,12 @@ def _render_eval(rows, gate, cfg) -> int:
 # PostToolUse / SessionEnd in Phase 6 is a line each here and a module in dict8.hooks.
 HOOK_HANDLERS = {"user-prompt-submit": "dict8.hooks.user_prompt_submit"}
 
+# Printed when a command needs `classifier.backend` and the optional extra is not installed.
+# Phrased as the command to run, because "ModuleNotFoundError: mlx_lm" is not one.
+MISSING_EXTRA = ("mlx-lm is not installed. It is an optional extra so the headless usage "
+                 "layer stays light — re-run as `uv run --extra classify dict8 "
+                 "classify-backfill …`. Nothing was classified and nothing was written.")
+
 HOOK_HELP = """usage: dict8 hook <event> [--config PATH]
 
 Run a Claude Code hook handler. Reads the hook payload as JSON on stdin and writes the
@@ -560,7 +576,14 @@ def cmd_classify_backfill(args, cfg) -> int:
     Dict8's store, which has no text column) and writes back only the resulting bucket —
     see dict8.usage.parser.read_prompt_text and dict8.advise.classifier.
     """
-    from dict8.advise.classifier import Classifier
+    from dict8.advise.classifier import BackendUnavailable, Classifier, backend_available
+
+    # `classifier.backend` ships as the optional `classify` extra, so the base install of
+    # the headless layer does not carry it. Say so once, in one line, before anything is
+    # loaded or opened — a stack trace out of a worker process is not an error message.
+    if not backend_available():
+        print(f"classify-backfill: {MISSING_EXTRA}", file=sys.stderr)
+        return 1
 
     with _open_store(cfg) as store:
         work = store.unclassified_turns()
@@ -573,7 +596,11 @@ def cmd_classify_backfill(args, cfg) -> int:
         print(f"loading {cfg.get('classifier.model')} …")
         clf = Classifier(cfg)
         t_load0 = time.monotonic()
-        clf.warm()  # pay the model-load cost once, up front, not on turn 1
+        try:
+            clf.warm()  # pay the model-load cost once, up front, not on turn 1
+        except BackendUnavailable as exc:
+            print(f"classify-backfill: {exc}", file=sys.stderr)
+            return 1
         print(f"loaded in {time.monotonic() - t_load0:.1f}s\n")
 
         counts: dict[str, int] = {}
@@ -589,7 +616,9 @@ def cmd_classify_backfill(args, cfg) -> int:
             if result is None:
                 omitted += 1
                 continue
-            store.set_task_type(turn["prompt_uuid"], result.bucket, result.confidence, clf.model_id)
+            # No confidence: prompts/classify.md no longer asks for one (U4). The column
+            # stays and takes NULL — see Store.set_task_type.
+            store.set_task_type(turn["prompt_uuid"], result.bucket, clf.model_id)
             counts[result.bucket] = counts.get(result.bucket, 0) + 1
             latencies.append(result.latency_ms)
             if i % 25 == 0 or i == len(work):
@@ -627,13 +656,16 @@ def main(argv: list[str] | None = None) -> int:
 
     t = sub.add_parser("tail", help="watch for new turns and record them incrementally")
     t.add_argument("--root")
-    t.add_argument("--interval", type=float, default=2.0, help="seconds between ticks")
+    t.add_argument("--interval", type=float, default=None,
+                   help="seconds between ticks (default: cli.tail_interval_s)")
     t.add_argument("--once", action="store_true", help="single tick, then exit")
     t.set_defaults(func=cmd_tail)
 
     r = sub.add_parser("reconcile", help="cross-check our totals against claude-tokens")
-    r.add_argument("--days", type=int, default=7)
-    r.add_argument("--tolerance", type=float, default=0.5, help="max %% delta to pass")
+    r.add_argument("--days", type=int, default=None,
+                   help="settled days in the window (default: cli.reconcile_days)")
+    r.add_argument("--tolerance", type=float, default=None,
+                   help="max %% delta to pass (default: cli.reconcile_tolerance_pct)")
     r.add_argument("--include-today", action="store_true",
                    help="include the still-being-written current day (expect drift)")
     r.set_defaults(func=cmd_reconcile)
@@ -693,6 +725,13 @@ def main(argv: list[str] | None = None) -> int:
         if not getattr(args, "is_hook", False):
             raise
         cfg = None
+    if cfg is not None:
+        # Warnings from anywhere under `dict8.` go to `paths.logs/dict8.log` from here on,
+        # and only errors reach stderr. The human-readable summaries these commands print
+        # are `print()` calls and are unaffected; what stops appearing underneath them is
+        # the per-call noise (see dict8.logs). Hooks are NOT routed through this — they
+        # keep their own non-blocking hooks.log, for reasons measured in dict8.hooks.
+        logs.setup(cfg)
     try:
         return args.func(args, cfg)
     except config_mod.ConfigGap as exc:
