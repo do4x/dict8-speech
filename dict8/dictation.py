@@ -44,7 +44,7 @@ ROW_KEYS = {
     "chars": int, "frontmost_changed": bool,
     "commands": str, "submitted": bool,
 }
-SOURCES = {"hotkey", "file", "demo"}
+SOURCES = {"hotkey", "file", "demo", "preview"}
 OUTCOMES = {"injected", "transcribed_only", "discarded_short", "cancelled", "empty", "silent",
             "error"}
 

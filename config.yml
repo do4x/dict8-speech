@@ -32,6 +32,12 @@ permissions:                    # TCC. All three are requested in onboarding and
                                 # mid-session toasts instead of the tap going quietly deaf.
                                 # Three preflight calls, no prompt; cost is negligible at any
                                 # sane value. Every press re-checks regardless (recheck_on).
+  ask_at_launch: true           # Denis, 2026-09-19: "add it so it asks for microphone permissions".
+                                # `dict8 app` shows macOS's own dialog at launch for every grant
+                                # not yet granted (macOS shows each dialog once; after that the
+                                # window's Open Settings button is the fix). Also asked on the
+                                # first press while the microphone is still unasked. Off: only
+                                # the window's and the menu's buttons ask.
   settings_links:               # System Settings deep links, opened by menu › Check permissions
     microphone: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
     accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -487,6 +493,17 @@ overlay:                        # dict8/ui/overlay.py — the non-activating pan
                                 # short enough to be gone before the next dictation. Unmeasured
                                 # against Denis's reading; the panel never takes focus or clicks,
                                 # so erring long costs screen space, not input.
+
+window:                         # dict8/ui/window.py — the Dict8 window (Denis, 2026-09-19: "I'd like
+                                # to see the UI"). Status, permissions with the buttons that fix
+                                # them, models, last dictation, meter, and a box to dictate into.
+  show_at_launch: true          # provisional (2026-09-19): open it when `dict8 app` starts; the
+                                # menu's "Open Dict8 window" reopens it after it is closed.
+  preview_text: "Fix the failing test in the transcript parser and explain what caused it."
+                                # provisional (2026-09-19): what "Preview overlay" runs through the
+                                # real classifier + estimator so the overlay can be seen without
+                                # the microphone. Nothing is typed and no meter row is opened; its
+                                # latency row says `source: preview`, which bench_latency skips.
 
 meter:                          # the live meter in `dict8 app` (polls with cli.tail_interval_s)
   turn_idle_s: 900              # provisional (2026-09-19): a dictation's estimate-vs-actual row is

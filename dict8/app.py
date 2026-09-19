@@ -15,9 +15,15 @@ Threads:
 
 Permissions (invariant 7b) are preflighted at launch, on every press, and on a
 `permissions.poll_interval_s` timer, so a grant revoked mid-session produces a toast rather
-than a tap that silently stops seeing keys. Launch never prompts: the tap is only created
-once both Accessibility and Input Monitoring preflight as granted, and the microphone is
-only opened by a press of the talk key.
+than a tap that silently stops seeing keys. With `permissions.ask_at_launch` (Denis,
+2026-09-19) launch shows macOS's own dialog for every grant not yet granted, and a press
+while the microphone is still unasked asks instead of recording. `--demo` and `--dry-run`
+never ask. The tap is only created once both Accessibility and Input Monitoring preflight
+as granted.
+
+The Dict8 window (dict8.ui.window) mirrors all of it: state, the three grants with the
+button that fixes each, the two models, the last dictation with its advice, the meter, and
+a practice box to dictate into.
 
 The last transcript is kept in memory only (menu › Copy last transcript) so that even the
 case where the pasteboard write itself fails does not lose a prompt. It is never written
@@ -47,6 +53,21 @@ from dict8.usage.meter import fmt_tokens
 log = logging.getLogger(__name__)
 
 DEMO = "demo"                   # a queued `--demo` text, run through dictation.deliver()
+PREVIEW = "preview"             # the window's "Preview overlay": config window.preview_text,
+                                # nothing typed, no meter row, `source: preview` latency row
+
+# The window's "Last dictation" line, by overlay state.
+LAST_TEXT = {
+    "typed": "Typed",
+    "sent": "Typed and sent",
+    "pasted": "Pasted",
+    "clipboard": "Put on the clipboard, not typed — press ⌘V",
+    "cancelled": "Cancelled — nothing typed",
+    "nothing": "Heard nothing — nothing typed",
+    "error": "Failed",
+    DEMO: "Demo — nothing typed",
+    PREVIEW: "Preview — nothing typed",
+}
 # `--demo` pacing only: how long the demo thread lets the run loop draw before it checks the
 # panel, and the gap between demo texts so each overlay can be seen. Never on a real
 # dictation's path.
@@ -113,7 +134,9 @@ class Controller:
         self.last_text: str | None = None
         self.q: queue.Queue = queue.Queue()
         self.tray = None
+        self.window = None
         self.tap: HotkeyTap | None = None
+        self._ask_auto = bool(cfg.require("permissions.ask_at_launch")) and not dry_run
         self.perm_states: dict[str, str] = {}
         self._press_front: int | None = None
         self._recording = False
@@ -139,6 +162,13 @@ class Controller:
     def ui(self, state: str, detail: str = "") -> None:
         if self.tray is not None:
             self.call_main(self.tray.set_state, state, detail)
+        if self.window is not None:
+            self.call_main(self.window.set_state, state, detail)
+
+    def win(self, method: str, *args, **kwargs) -> None:
+        """Update the Dict8 window from any thread (a no-op before it exists)."""
+        if self.window is not None:
+            self.call_main(lambda: getattr(self.window, method)(*args, **kwargs))
 
     def toast(self, title: str, body: str) -> None:
         toast_mod.toast(title, body)
@@ -150,6 +180,7 @@ class Controller:
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         from dict8.ui.overlay import Overlay
         from dict8.ui.tray import Tray
+        from dict8.ui.window import StatusWindow, install_edit_menu
 
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon
@@ -160,15 +191,30 @@ class Controller:
         hotkey_label = (f"hold {self.cfg.require('hotkey.push_to_talk')}, "
                         f"{self.cfg.require('hotkey.cancel')} cancels")
         self.tray = Tray({"check_permissions": self.check_permissions,
-                          "copy_last": self.copy_last, "quit": self.quit},
+                          "copy_last": self.copy_last, "quit": self.quit,
+                          "open_window": self.open_window},
                          hotkey_label=hotkey_label, mic_label=mic_label)
+        install_edit_menu()
+        self.window = StatusWindow(
+            self.cfg, {"grant": self.ask_from_window, "preview": self.preview,
+                       "copy_last": self.copy_last, "quit": self.quit},
+            stt_model=self.stt.model_id,
+            classifier_model=str(self.cfg.require("classifier.model")), mic_label=mic_label)
         toast_mod.add_listener(lambda t, b: self.call_main(self.tray.set_error, t))
+        toast_mod.add_listener(lambda t, b: self.win("set_notice", f"{t} — {b}"))
         toast_mod.add_listener(lambda t, b: say(f"toast: {t} — {b}"))
         say(f"status item created, title {self.tray.title!r} (pid {os.getpid()}, "
             f"host {permissions.host_app()}{', DRY RUN: mic never opened' if self.dry_run else ''})")
 
         self.overlay = Overlay(self.cfg)
-        self.refresh_permissions(announce=True)
+        if demo:
+            self._ask_auto = False
+        self.refresh_permissions(announce=True, toast_missing=not self._ask_auto)
+        if self.cfg.require("window.show_at_launch") and not demo:
+            self.window.show()
+        if self._ask_auto:
+            for g in permissions.missing(self.perm_states):
+                self.ask(g)
         self._install_tap()
         threading.Thread(target=self._worker, name="dict8-worker", daemon=True).start()
         threading.Thread(target=self._load, name="dict8-stt-load", daemon=True).start()
@@ -197,9 +243,11 @@ class Controller:
             self.recorder = Recorder(self.cfg, self.stt.sample_rate)
             self.ready = True
             say(f"stt ready: {self.stt.model_id} loaded + warmed in {ms:.0f} ms")
+            self.win("set_model", "stt", f"loaded and warm ({ms:.0f} ms)", True)
             self.ui("idle")
         except Exception as exc:
             say(f"stt FAILED to load: {exc}")
+            self.win("set_model", "stt", f"failed to load: {type(exc).__name__}", False)
             self.toast("Dict8: speech model failed to load", f"{type(exc).__name__}: {exc}")
             self.ui("error", "STT not loaded")
 
@@ -212,15 +260,18 @@ class Controller:
             if not backend_available():
                 say(f"classifier unavailable — no model chip this session: "
                     f"{MISSING_BACKEND_HINT}")
+                self.win("set_model", "classifier", "not installed — no model chip", False)
                 return
             t0 = time.perf_counter()
             clf = Classifier(self.cfg)
             clf.warm()
             self.classifier = clf
-            say(f"classifier ready: {clf.model_id} warmed in "
-                f"{(time.perf_counter() - t0) * 1000:.0f} ms")
+            ms = (time.perf_counter() - t0) * 1000
+            say(f"classifier ready: {clf.model_id} warmed in {ms:.0f} ms")
+            self.win("set_model", "classifier", f"ready ({ms:.0f} ms)", True)
         except Exception as exc:
             say(f"classifier failed to load — no model chip this session ({exc!r})")
+            self.win("set_model", "classifier", "failed to load — no model chip", False)
         finally:
             self.classifier_ready.set()
 
@@ -235,8 +286,8 @@ class Controller:
         need = [g for g in ("accessibility", "input_monitoring")
                 if self.perm_states.get(g) != permissions.GRANTED]
         if need:
-            self._note_tap(f"hotkey NOT installed — missing: {', '.join(need)} (no prompt "
-                           f"shown; menu › Check permissions asks)")
+            self._note_tap(f"hotkey NOT installed — missing: {', '.join(need)} (the "
+                           f"window's buttons and menu › Check permissions fix it)")
             return
         tap = HotkeyTap(self.cfg, self.on_action)
         if tap.install():
@@ -252,19 +303,60 @@ class Controller:
 
     # -- permissions -------------------------------------------------------------------
 
-    def refresh_permissions(self, *, announce: bool = False) -> list[str]:
+    def refresh_permissions(self, *, announce: bool = False,
+                            toast_missing: bool = True) -> list[str]:
         prev = self.perm_states
         states = permissions.check()
         self.perm_states = states
         if self.tray is not None:
             self.call_main(self.tray.set_permissions, states)
+        self.win("set_permissions", dict(states))
         gone = permissions.missing(states)
         if announce:
             say("permissions: " + ", ".join(f"{k}={v}" for k, v in states.items()))
         for g in gone:
-            if announce or prev.get(g) == permissions.GRANTED:
+            if (announce and toast_missing) or prev.get(g) == permissions.GRANTED:
                 self.toast(*permissions.toast_text(g, state=states.get(g)))
         return gone
+
+    def ask(self, grant: str, *, settings: bool = False) -> None:
+        """Show macOS's own dialog for `grant`. macOS shows it once; for a grant already
+        answered, `settings` opens its System Settings pane instead. Any thread."""
+        state = permissions.check().get(grant, "unknown")
+        if state == permissions.GRANTED:
+            self.refresh_permissions()
+            return
+        if grant == "microphone" and state == "not_determined":
+            self.toast(*permissions.asking_text(grant))
+            say("permissions: asking macOS for the microphone (its dialog should be on screen)")
+            permissions.request(grant, on_done=lambda ok: self._answered(grant, ok))
+            return
+        try:
+            if grant != "microphone":
+                permissions.request(grant)   # a one-time dialog; nothing once answered
+            if settings:
+                permissions.open_settings(self.cfg, grant)
+        except Exception as exc:
+            log.warning("permissions: could not request/open %s (%s)", grant, exc)
+        self.toast(*permissions.toast_text(grant, state=state))
+
+    def _answered(self, grant: str, ok: bool) -> None:
+        """AVFoundation's completion handler, on its own thread."""
+        self.refresh_permissions()
+        state = self.perm_states.get(grant, "unknown")
+        say(f"permissions: {grant} dialog answered: {'allowed' if ok else state}")
+        self.toast(*permissions.answer_text(grant, ok, state))
+        if ok and self.ready and not self._recording:
+            self.ui("idle")
+
+    def ask_from_window(self, grant: str) -> None:
+        """The window's Allow… / Open Settings button — the user asked, so a grant macOS
+        will not ask about again gets its Settings pane."""
+        self.ask(grant, settings=True)
+
+    def open_window(self) -> None:
+        if self.window is not None:
+            self.window.show()
 
     def _poll(self) -> None:
         self.refresh_permissions()
@@ -280,12 +372,7 @@ class Controller:
         """Menu action — user-initiated, so this is where prompts and Settings panes open."""
         gone = self.refresh_permissions()
         for g in gone:
-            try:
-                permissions.request(g)
-                permissions.open_settings(self.cfg, g)
-            except Exception as exc:
-                log.warning("permissions: could not request/open %s (%s)", g, exc)
-            self.toast(*permissions.toast_text(g, state=self.perm_states.get(g)))
+            self.ask(g, settings=True)
         if not gone:
             self.toast("Dict8: permissions OK", "Microphone, Accessibility and Input "
                                                 "Monitoring are all granted.")
@@ -305,6 +392,8 @@ class Controller:
             try:
                 if action == DEMO:
                     self._demo_one(t, front)
+                elif action == PREVIEW:
+                    self._preview_one(t, front)
                 elif self.dry_run:
                     say(f"hotkey {action} (dry run)")
                 elif action == PRESS:
@@ -328,6 +417,12 @@ class Controller:
         if self.perm_states.get("microphone") in ("denied", "restricted"):
             self.toast(*permissions.toast_text("microphone"))
             self.ui("error", "microphone")
+            return
+        if self.perm_states.get("microphone") == "not_determined" and self._ask_auto:
+            # Opening the stream does not reliably raise the dialog from a terminal-hosted
+            # process, and whatever it recorded meanwhile would be silence. Ask, don't record.
+            self.ask("microphone")
+            self.ui("error", "allow the microphone, then hold the key again")
             return
         self._press_front = front
         try:
@@ -368,6 +463,7 @@ class Controller:
         if audio is None:
             dictation.record(self.cfg, {"source": "hotkey", "outcome": "discarded_short",
                                         "audio_ms": audio_ms})
+            self.win("set_last", f"Too short ({audio_ms:.0f} ms held) — nothing typed", None)
             self.ui("idle")
             if self.overlay is not None:
                 self.call_main(self.overlay.hide)
@@ -410,6 +506,10 @@ class Controller:
     def _overlay_state(self, state: str, *, clear: bool = False, override: str | None = None,
                        pending: bool = False) -> None:
         def show():
+            if self.window is not None and (clear or pending or override):
+                self.window.set_advice(chip=None, strength=None,
+                                       estimate="est. …" if pending else None,
+                                       override=override)
             if self.overlay is None:
                 return
             if clear:
@@ -438,9 +538,13 @@ class Controller:
         elif path == PATH_NONE and out.submitted:
             state = "sent"
         elif path == PATH_NONE and v is not None and v.text:
-            state = DEMO if source == DEMO else "typed"
+            state = source if source in (DEMO, PREVIEW) else "typed"
         else:
             state = "nothing"
+        heard = None if (v is not None and v.cancel) else (
+            self.last_text if source == "hotkey" else (v.text if v is not None else None))
+        self.win("set_last", f"{LAST_TEXT.get(state, state)} · "
+                             f"{out.release_to_text_ms:.0f} ms from release to text", heard)
         override = None
         if v is not None and v.override:
             entry = rec_mod.by_id(self.cfg, v.override)
@@ -451,7 +555,9 @@ class Controller:
         if not advise:
             return
         seq = self._seq
-        self.meter_q.put(("open", seq, release_wall_time(t_release), len(text.split()), source))
+        if source != PREVIEW:   # a preview is not a prompt: no estimate-vs-actual row
+            self.meter_q.put(("open", seq, release_wall_time(t_release), len(text.split()),
+                              source))
         self.advice_q.put(AdviceJob(seq=seq, text=text, words=len(text.split()),
                                     override=v.override, t_release=t_release,
                                     t_injected=t_injected, source=source))
@@ -503,6 +609,10 @@ class Controller:
             self.overlay.set_advice(chip=rec.label if rec else None,
                                     strength=rec.strength_line if rec else None,
                                     estimate=est_text, override=override)
+        if not stale and self.window is not None:
+            self.window.set_advice(chip=rec.label if rec else None,
+                                   strength=rec.strength_line if rec else None,
+                                   estimate=est_text, override=override)
         model = timings["model_ms"]
         say(f"advice #{job.seq} ({job.source}): release->injected "
             f"{(job.t_injected - job.t_release) * 1000:.1f} ms, release->chip "
@@ -587,6 +697,7 @@ class Controller:
         except Exception as exc:
             burn = f"Burn rate: unavailable ({type(exc).__name__})"
         self.call_main(self.tray.set_meter, st.title_suffix(), session, since, burn)
+        self.win("set_meter", session, since, burn)
 
     # -- demo (`dict8 app --demo TEXT`) -------------------------------------------------
 
@@ -623,6 +734,20 @@ class Controller:
             say(f"demo {i}: chip shown={shown}; frontmost app before={before} after={after} "
                 f"changed={before != after}")
             time.sleep(DEMO_PAUSE_S)
+
+    # -- the window's "Preview overlay" -----------------------------------------------
+
+    def preview(self) -> None:
+        """Main thread (a button). Queued like a dictation so it never overlaps one."""
+        self.q.put((PREVIEW, time.perf_counter(), str(self.cfg.require("window.preview_text"))))
+
+    def _preview_one(self, t_release: float, text: str) -> None:
+        if self._recording:
+            return
+        self._seq += 1
+        out = dictation.deliver(self.cfg, self.injector, text, t_release=t_release,
+                                source=PREVIEW, force=PATH_NONE)
+        self._after_delivery(out, t_release, PREVIEW)
 
     def copy_last(self) -> None:
         if self.last_text:

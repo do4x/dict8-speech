@@ -45,6 +45,9 @@ class _MenuTarget(NSObject):
         self.handlers = handlers
         return self
 
+    def openWindow_(self, sender):
+        self.handlers["open_window"]()
+
     def checkPermissions_(self, sender):
         self.handlers["check_permissions"]()
 
@@ -70,7 +73,7 @@ class Tray:
         self.menu.setAutoenablesItems_(False)
 
         self.state_line = _info("State: loading")
-        self.error_line = _info("Last error: none")
+        self.error_line = _info("Last message: none")
         self.perm_line = _info("Permissions: not checked yet")
         self.menu.addItem_(self.state_line)
         self.menu.addItem_(self.error_line)
@@ -83,7 +86,8 @@ class Tray:
         self.menu.addItem_(_info(f"Talk key: {hotkey_label}"))
         self.menu.addItem_(_info(f"Mic: {mic_label}"))
         self.menu.addItem_(NSMenuItem.separatorItem())
-        for title, sel in (("Check permissions", "checkPermissions:"),
+        for title, sel in (("Open Dict8 window", "openWindow:"),
+                           ("Check permissions", "checkPermissions:"),
                            ("Copy last transcript", "copyLast:"),
                            ("Quit Dict8", "quit:")):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
@@ -116,7 +120,7 @@ class Tray:
         self.burn_line.setTitle_(burn)
 
     def set_error(self, text: str) -> None:
-        self.error_line.setTitle_(f"Last error: {text}")
+        self.error_line.setTitle_(f"Last message: {text}")
 
     def set_permissions(self, states: dict[str, str]) -> None:
         self.perm_line.setTitle_("Permissions: " + ", ".join(

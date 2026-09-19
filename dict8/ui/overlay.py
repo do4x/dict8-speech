@@ -57,6 +57,7 @@ STATE_TEXT = {
     "cancelled": "✕ Cancelled — nothing typed",
     "nothing": "Heard nothing — nothing typed",
     "demo": "Demo — text not typed (injection off)",
+    "preview": "Preview — nothing typed",
     "error": "⚠ Dictation failed",
 }
 

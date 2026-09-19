@@ -82,7 +82,7 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
 - `dict8/usage/` — JSONL tail-reader, dedup index, SQLite writer, backfill
 - `dict8/advise/` — detector, classifier client, enhancer, config-driven model lookup, estimator
 - `dict8/hooks/` — UserPromptSubmit / PostToolUse / SessionEnd handlers (fail-open)
-- `dict8/ui/` — tray icon, overlay, toasts. Nothing else.
+- `dict8/ui/` — tray icon, overlay, toasts, the Dict8 window. Nothing else.
 - `prompts/` — classifier and enhancer prompts + their eval sets
 - `docs/verified-schemas.md` — observed JSONL + hook payload shapes
 - `docs/ADR-000-platform.md` — platform re-target (windows -> macos), supersedes the seeded locks
@@ -94,7 +94,8 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
 Any OS but macOS, and any Mac that isn't Apple Silicon. Any tool but Claude Code.
 Non-English dictation (v1 is English-only; revisiting it changes the STT model choice).
 Other providers' quota routing (no local data exists to fit on). USD cost display. Any UI
-beyond tray icon + overlay + toast. Settings GUI — `config.yml` is the settings surface.
+beyond tray icon + overlay + toast + the one Dict8 status window (Denis, 2026-09-19).
+Settings GUI — `config.yml` is the settings surface.
 
 ## Build order
 Usage layer ships first and headless (Phases 1–2: parser, estimator, `UserPromptSubmit`

@@ -6,7 +6,7 @@ never spliced into the AppleScript source, so a quote in a message cannot break 
 into) the script. Launched without waiting: a toast must never sit on the dictation path.
 
 Every toast is also written to `dict8.log` at WARNING (the durable record) and handed to the
-menu-bar item's "Last error" line when one is registered. **No transcript text is ever
+menu-bar item's "Last message" line when one is registered. **No transcript text is ever
 passed here** — messages name what went wrong, not what was said.
 """
 
@@ -22,7 +22,7 @@ _SCRIPT = ["-e", "on run argv", "-e",
            "display notification (item 2 of argv) with title (item 1 of argv)",
            "-e", "end run"]
 
-# Extra sinks (the tray's "Last error" line). Called with (title, body).
+# Extra sinks (the tray's "Last message" line, the window's notice line). Called with (title, body).
 _listeners: list[Callable[[str, str], None]] = []
 
 # False: log + listeners only, no Notification Center banner (`dict8 app --no-notify`).
