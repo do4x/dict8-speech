@@ -4,62 +4,76 @@ Started 2026-09-18 on Denis's instruction: "implement a self recursive agentic l
 opus 5 on high/max subagents". Runs inside the interactive session on this Mac. Stops by itself
 at the first thing that needs Denis's hands or a decision only he can make.
 
+## Bar lowered — Denis, 2026-09-19
+
+"Decrease the certainty level needed to move to the next phase." Denis also set a budget: finish
+inside 50-70% of the remaining usage, and he wants to test the thing himself. What changes:
+
+- **One verifier pass, only where a failure is silent.** Injection, permissions, and hooks get
+  one fresh-context verifier at high effort. Everything else gets an orchestrator spot-check:
+  re-run the gate, read the diff stat, commit.
+- **Findings don't block.** A verifier FAIL gets one builder fix round. Whatever is left after
+  that is logged as a caveat and the unit is committed.
+- **The builder runs at high effort, not max.**
+- **Provisional defaults instead of stopping.** A value needed to test goes into `config.yml` as a
+  reasoned default marked `provisional`. Denis can change it at any time, and it is listed under
+  Needs Denis. Only a TCC click, spoken audio, spend, or relaxing an invariant still stops the loop.
+- **Phase sign-off is the gate output plus this log.** There is no separate wait.
+
 ## Roles
 
 | Role | Who | Effort | Does |
 |---|---|---|---|
-| Orchestrator | the interactive session (Fable 5.1) | — | picks the next unit, briefs, verifies, commits, logs, reschedules. Writes no product code |
-| builder | `.claude/agents/builder.md` (Opus 5) | max | one unit end to end, runs its gate, reports measured output |
-| verifier | `.claude/agents/verifier.md` (Opus 5) | high | fresh-context re-run of the gate and diff review against the invariants |
+| Orchestrator | the interactive session | — | picks the next unit, briefs, spot-checks, commits, logs, reschedules |
+| builder | `.claude/agents/builder.md` (Opus 5) | high | one unit end to end, runs its gate, reports measured output |
+| verifier | `.claude/agents/verifier.md` (Opus 5) | high | one fresh-context pass, only on units marked `verify` |
 
 ## One iteration
 
-1. Take the first unit with status `todo`. Set it `in-progress`.
-2. Spawn `builder` with the unit's scope and gate. The builder does not commit.
-3. Spawn `verifier` on the result. `FAIL` → send the findings back to the same builder (its
-   context intact), at most 2 more rounds.
-4. `PASS` → orchestrator commits on branch `claude/modest-hamilton-lh72fw` (no push), logs the
-   gate numbers and the commit hash, sets `done`.
-5. Still `FAIL` after 3 rounds → `blocked`, last findings logged, next unit.
-6. Reschedule. The loop ends when no `todo` unit is left.
+1. Take the first `todo` unit and set it to `in-progress`.
+2. Spawn `builder`. The builder does not commit.
+3. If the unit is marked `verify`, spawn `verifier` once. On FAIL, the builder gets one fix round.
+4. The orchestrator re-runs the gate, commits on the branch without pushing, logs it, and sets the unit to `done`.
+5. Reschedule. The loop ends when no `todo` unit is left.
 
-## Stop rules — hand back to Denis instead of guessing
+## Stop rules
 
-A TCC permission click. A hotkey choice. Spoken audio. Any spend. Relaxing a CLAUDE.md
-invariant. Confirming Windows is the real target (see `docs/prompt-check-2026-09-18.md`).
-A gate that cannot be made to fail on an empty measurement.
+A TCC permission click, spoken audio, any spend, or relaxing a CLAUDE.md invariant.
 
-## Standing assumptions (Denis: correct any of these and the loop re-plans)
+## Provisional defaults (2026-09-19, change any in config.yml)
 
-- The Phase 1 gate (8/8 on 09-15 and 09-18) is treated as signed off by the loop instruction.
-- The repo build order stands: usage → estimator/hook → shell → dictation → detect/enhance →
-  meter. The brief's "dictation first" needs Denis's hands at every step; the estimator does not.
-- Target is macOS / Apple Silicon (ADR-000). The pasted brief's Windows lines are void.
-- Hooks get registered in this repo's `.claude/settings.json` first, so they fire only inside
-  Dict8. Going global in `~/.claude/settings.json` is Denis's call.
-- Each verified unit is committed on the feature branch. Nothing is pushed.
+- **Hotkey:** hold right Option to talk, press Esc while holding to cancel, using a CGEventTap. fn/Globe is
+  taken by macOS dictation and emoji. Right Option alone types nothing.
+- **STT:** mlx-whisper, with the model picked by a quick warm-latency bench on clips made by macOS `say`.
+  The real-speech bench stays a Denis item.
+- **`models[]`:** the models seen in Denis's own transcripts, with a one-line strength each and the bucket to
+  model mapping marked provisional.
+- **Run from the terminal:** the app runs under the terminal's or VS Code's TCC grants for testing. The signed
+  `.app` (ADR-001) is deferred until after the MVP works.
+- **Live meter:** the app polls the transcript tail with the existing scanner instead of registering a
+  PostToolUse hook. It reads the same data and adds no latency to every tool call.
+- **Deferred past the MVP:** enhancement and detection (the rest of Phase 5). The brief's "done" needs neither.
 
 ## Queue
 
 | Unit | Status | Scope | Gate |
 |---|---|---|---|
-| U1 quota check-in | done | `dict8 quota <pct>` stores `{weekly_pct, timestamp, source}` in SQLite (new table, additive migration); `dict8 quota` with no argument shows the last reading and its age. A reading older than `quota.stale_after_hours` is labeled stale; while that key is TBD the output says the threshold is unset rather than picking one. Never presents an inferred number as read. | reading stored and re-read with its age; stale label appears for a backdated reading once a threshold exists; TBD surfaces as a labeled gap, not a default; gate_phase1 still 8/8 |
-| U2 estimator | done | `dict8/advise/estimator.py` and `dict8 estimate --words N --files N --bucket B --model M`. Fit on the backfill: bucket medians + quantiles versus a simple regression; held-out MAPE and interval coverage for both; ship the winner; output a range with the sample count behind it; out-of-distribution → "not enough similar history". Target is total tokens, with the cache-read share reported alongside and the HANDOFF section 4.8 caveat in the module docstring. | both methods' held-out MAPE and coverage printed from a real run; a weird prompt gets the refusal; no USD; nothing hardcoded; `estimate.method` in config names the winner with the numbers |
-| U3 UserPromptSubmit hook | done | `dict8/hooks/user_prompt_submit.py`: computes the estimate locally (no model call) and returns it as context; fails open on crash, missing DB, slow disk, timeout, with one log line to `paths.logs`; kill switch in config. Registered in this repo's `.claude/settings.json`; `paths.claude_settings` filled with that path and the reason. The real hook payload is captured from a live invocation and pinned in `docs/verified-schemas.md` before any field is parsed. `scripts/gate_phase2.py` covers the five Phase 2 gate lines. | gate_phase2 all PASS with measured output; hook fires on a real prompt in this repo and the estimate appears; DB deleted → prompt still goes through and the log says why |
-| U4 debts | done | Thresholds out of code into `config.yml` (HANDOFF section 6 list); `mlx-lm` becomes an optional extra so the headless layer installs light; warnings to `paths.logs`; unit tests for dedup, turn assembly and `is_human_prompt` on real-shaped fixtures with no prompt text committed. Classifier: drop `why` and `confidence` from the output if the eval gate holds, then re-measure the ~100-word coverage line on the DB. | `uv run pytest` green; gate_phase1 8/8; gate_classifier at least 10/12; grep finds no hardcoded thresholds |
-| U5 ADR-002 hotkey | todo | `docs/ADR-002-hotkey.md`: CGEventTap versus RegisterEventHotKey, decided on clean key-up while another app has focus and on what each costs in permissions. Probe on this machine what needs no grant (`AXIsProcessTrusted`, `CGPreflightListenEventAccess`, event-tap creation result) and mark every permission claim measured or documented. Fill `hotkey.mechanism`. Keys stay TBD. | ADR written and locked; `hotkey.mechanism` filled with the reason; each permission claim labeled measured or documented |
-| U6 STT bench (provisional) | todo | Run `bench/stt_bench.py` for all three backends across the three candidate models with clips synthesized by macOS `say` from `bench/scripts.yml`, cold and warm, 3/10/30 s. Fill `stt.*` with the winner, each comment marked `provisional: synthesized speech`. The real-speech re-run stays a Denis item; `hardware.mic_device` stays TBD. | results table with real numbers from this chip, warm and cold; `stt.backend`, `stt.model`, `stt.compute`, `stt.quantization` filled and labeled provisional |
-| U7 dictation code, headless-testable | todo | `dict8/audio stt inject permissions ui` per the repo map; `scripts/bench_latency.py`; permission checks that name the missing grant in a toast; three-tier injection with Secure Input detection; `dict8 dictate --file clip.wav` exercising STT → inject → pasteboard-only fallback without a mic or hotkey. No key wiring beyond the mechanism from U5, because the keys are TBD. | unit tests green; `dictate --file` lands `snake_case_id, {braces}, "quotes"` and curly quotes byte-identical on the pasteboard; the live 20-dictation gate is listed under Needs Denis, not claimed |
+| U1 quota check-in | done | `dict8 quota` | see Log |
+| U2 estimator | done | `dict8 estimate` | see Log |
+| U3 UserPromptSubmit hook | done | estimate as context on every prompt in this repo | see Log |
+| U4 debts | done | thresholds to config, optional mlx-lm, logging, 72 unit tests | see Log |
+| U5 dictation MVP | in-progress, verify | `dict8 app`: menu-bar item, hold-to-talk, record, mlx-whisper, inject with pasteboard fallback, permission toasts, latency log; `dict8 dictate --file` headless path; ADR-002 as one page | pytest green; `dictate --file` on `say` clips lands text byte-identical on the pasteboard; the app starts, shows its icon and names every missing permission; warm STT latency measured |
+| U6 overlay, advice, meter | todo | overlay panel on release: transcript status, recommended model (bucket to `models[]` lookup), estimate range; voice commands `send` / `cancel` / `use <model>` stripped and acted on; menu-bar meter of the session's live tokens against its estimate | pytest green; overlay renders with a fake transcript; meter matches `dict8 usage` for a finished session |
+| U7 real-task test | needs Denis | grant Microphone, Accessibility and Input Monitoring; dictate a real prompt into Claude Code; read the overlay; watch the meter | brief's "Done means" |
+| ~~U5 ADR-002 / U6 STT bench / U7 dictation code~~ | replaced 2026-09-19 | folded into the new U5 and U6 | — |
 
-## Needs Denis (accumulates as the loop runs)
+## Needs Denis
 
-- Confirm macOS is still the target. The pasted brief says Windows.
-- `models[]`: the recommender's whole vocabulary. Id, label, one-line strength for each.
-- `hotkey.push_to_talk`, `hotkey.push_to_talk_enhanced`, `hotkey.cancel`.
-- `quota.checkin_cadence`, `quota.stale_after_hours`, and the first `dict8 quota <pct>` reading from `/usage`.
-- `enhance.default`, `packaging.*`, `privacy.transcript_retention`.
-- Three TCC grants (Microphone, Accessibility, Input Monitoring) and 20 real dictations for the Phase 4 gate.
-- Real-speech STT bench run (`bench/stt.md`, "How to run it").
+- Say which usage figure the 50-70% budget refers to. If it is the weekly quota, `dict8 quota <pct>` with today's `/usage` number makes it measurable.
+- Confirm or change the provisional hotkey, STT model and `models[]`.
+- Three TCC grants and a real-task test (U7).
+- `quota.stale_after_hours` / `checkin_cadence`: the burn-rate warning stays off until these are set.
+- The real-speech STT bench, `packaging.*` and the signed `.app`, `enhance.default`, `privacy.transcript_retention`.
 
 ## Log
 
@@ -72,3 +86,4 @@ A gate that cannot be made to fail on an empty measurement.
 | 2026-09-19 00:35 | U3 | 1 | FAIL — settings.json command can exit 2 on empty `$CLAUDE_PROJECT_DIR` (blocks the prompt); post-watchdog log write unbounded (hung 2m17s on a FIFO); unloadable `--config` silently falls back to the real config/DB; live `claude -p` opt-out in the gate (spend); check 5 vacuous on empty store; latency claims inconsistent | gate_phase2 5/5 and gate_phase1 8/8 reproduced; watchdog fires at ~255 ms under a real lock; 14 hostile inputs all rc=0; sentinel never reaches log or DB; invariant 1 separation confirmed in transcript | fix round sent |
 | 2026-09-19 00:55 | U3 | 2 | PASS — settings command rc=0 in 7 hostile env cases; FIFO log path 52/43 ms (was 2m17s); failed `--config` → no estimate, no row, no fallback; gate live run opt-in; check 5 fails on empty store | gate_phase2 5/5 (no live), gate_phase1 8/8; watchdog fires at ~354 ms under a real lock; TBDs 25 | 344040e |
 | 2026-09-19 01:20 | U4 | 1 | PASS, 4 caveats sent back (dead `dedup_order` property, two stale HANDOFF sentences, try a voice-command rule for the "use opus" eval flip) | pytest 72/72 in 0.22 s, mutation-checked; gate_phase1 8/8; gate_phase2 5/5; gate_classifier 11/12 at median 337 ms (was 636); coverage on scratch copy 74→92 of 109 turns, max words 155→595; base env 326 MB→964 KB; TBDs 25 | pending fix round |
+| 2026-09-19 09:50 | U4 | 1+fix | PASS: dead code removed, 2 stale HANDOFF lines fixed; voice-command classifier rule skipped (caveat) | pytest 72/72; gate_phase1 8/8; gate_phase2 5/5; lock clean; TBDs 25 | f00ae6b |

@@ -104,10 +104,11 @@ then the live meter (6). MCP was considered and rejected: an MCP tool runs insid
 model's turn, which is after the tokens are committed — the wrong side of the decision.
 
 ## Phase state
-Current phase: **1** (usage core) — gate run 2026-09-15, re-run 2026-09-18, **8/8
-passing**; Denis has not explicitly signed it off. Phase 2 has not been started. Re-run with `uv run scripts/gate_phase1.py`.
-Phases are sequential and gated. Do not start phase N+1 until the phase N gate has been
-run and its output approved by Denis.
+Phases 1-2 are done: Phase 1 gate 8/8, Phase 2 gate 5/5, U1-U4 in `docs/LOOP.md`. The
+`UserPromptSubmit` hook is live, project-scoped. **Bar lowered by Denis, 2026-09-19:** a phase
+moves on when its gate output is logged in `docs/LOOP.md`, with no separate sign-off wait.
+Findings that survive one fix round become logged caveats. Values needed to test go into
+config as `provisional`. Next up is the dictation MVP; see the `docs/LOOP.md` queue.
 
 Out-of-order work already banked, from before the phases were renumbered (see git history):
 - **Phase 3 partial.** `docs/ADR-001-shell.md` written and LOCKED. `docs/ADR-002-hotkey.md`
