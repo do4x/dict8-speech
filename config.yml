@@ -27,6 +27,15 @@ permissions:                    # TCC. All three are requested in onboarding and
   note: "an unsigned binary loses its TCC grants when rebuilt — use a stable signing identity
          in dev or the permission dialogs reappear on every build"
   on_revoked: "toast with a deep link to the right Settings pane; never fail silently"
+  poll_interval_s: 5            # provisional (2026-09-19): how often `dict8 app` re-preflights
+                                # all three grants between dictations, so a grant revoked
+                                # mid-session toasts instead of the tap going quietly deaf.
+                                # Three preflight calls, no prompt; cost is negligible at any
+                                # sane value. Every press re-checks regardless (recheck_on).
+  settings_links:               # System Settings deep links, opened by menu › Check permissions
+    microphone: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+    accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    input_monitoring: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 
 packaging:
   bundle_id: "TBD"              # TCC grants attach to the signed bundle identity — must be stable
@@ -34,26 +43,44 @@ packaging:
   launch_at_login: "TBD"
 
 hotkey:
-  mechanism: "TBD"              # cgeventtap (needs Input Monitoring, clean key-up, can bind a bare
-                                # modifier) vs carbon_hotkey / RegisterEventHotKey (no permission,
-                                # awkward for hold, CANNOT bind bare fn/right-opt) — ADR-002, Phase 3
-  push_to_talk: "TBD"           # hold-to-talk; must not collide with terminal/IDE bindings
+  mechanism: "cgeventtap"       # provisional (2026-09-19): docs/ADR-002-hotkey.md — the only
+                                # mechanism that can bind a bare modifier with a clean key-up.
+                                # vs carbon_hotkey / RegisterEventHotKey (no permission, awkward
+                                # for hold, CANNOT bind bare fn/right-opt).
+  push_to_talk: "right_option"  # provisional (2026-09-19): docs/LOOP.md default — hold right
+                                # Option. Types nothing on its own, so it collides with no
+                                # terminal/IDE binding; fn/Globe is taken by macOS dictation and
+                                # emoji. Names come from dict8/hotkey.py KEYS.
   push_to_talk_enhanced: "TBD"  # same, but forces enhance mode regardless of detect result
-  cancel: "TBD"                 # abort without injecting
+  cancel: "escape"              # provisional (2026-09-19): Esc while the talk key is held aborts
+                                # without injecting. The Esc is swallowed so it cannot also
+                                # interrupt a running Claude Code turn.
 
 stt:
-  backend: "TBD"                # mlx-whisper | whispercpp-metal | faster-whisper-cpu — from benchmark
+  backend: "mlx-whisper"        # provisional (2026-09-19): synthesized speech (macOS `say`), quick
+                                # bench in bench/stt.md — only mlx-whisper was raced; the other
+                                # two backends wait for Denis's real-speech run.
                                 # NOT defaulted: CTranslate2 has no Metal backend, so the seeded
                                 # "faster-whisper unless beaten" default pre-judged the benchmark
-  model: "TBD"                  # from benchmark — see stt.candidates
-  compute: "TBD"                # metal | ane | cpu — follows the winning backend. NOT pre-set to
-                                # metal: faster-whisper-cpu is still in the race and runs on CPU,
-                                # so pinning metal here would pre-judge the benchmark again.
-  quantization: "TBD"           # backend-specific (q5_0, 4bit, int8, fp16) — from benchmark
+  model: "mlx-community/whisper-small.en-mlx"
+                                # provisional (2026-09-19): synthesized speech, warm median
+                                # 115 ms on a 3.0 s clip and 188 ms on 9.2 s (large-v3-turbo:
+                                # 338 / 405 ms), both models word-identical on both clips.
+                                # Cold load + warm-up 2.8 s, paid once at launch. HF repo id,
+                                # resolved from the local cache (see dict8/stt).
+  compute: "metal"              # provisional (2026-09-19): follows the backend — MLX runs on the
+                                # GPU via Metal, and the quick bench measured with this value.
+                                # metal | ane | cpu. Re-opens with the real-speech bench:
+                                # faster-whisper-cpu runs on CPU, so the backend decides this.
+  quantization: "fp16"          # provisional (2026-09-19): the mlx-community small.en weights
+                                # carry no quantization block, so they load and run as fp16;
+                                # measured with this value in the quick bench.
   language: "en"                # DECIDED: English-only for v1 MVP (Denis, 2026-09-14). Keeps all
                                 # three candidates eligible and drops the language-detection pass
                                 # from the hot path.
-  vad: true
+  vad: true                     # U5: an energy floor in front of STT (dict8.audio.is_silent,
+                                # audio.silence_floor_dbfs), not a speech detector. A silent
+                                # clip never reaches Whisper, which would invent words for it.
   keep_resident: true           # unified memory makes a warm model cheap; never reload per dictation
   candidates:                   # the Phase 3 benchmark matrix; bench reads this, nothing hardcoded
     backends: ["mlx-whisper", "whispercpp-metal", "faster-whisper-cpu"]
@@ -61,6 +88,25 @@ stt:
                                 # RESOLVED: language is "en", so the English-only models stay
                                 # eligible and all three candidates race. Adding a non-English
                                 # language later disqualifies small.en/medium.en — see ADR-000.
+
+audio:
+  min_hold_ms: 300              # SOURCE: prompts/build.md <phase_4_dictation_loop>, "release with
+                                # <300 ms of audio (discard silently)" — a spec value, not chosen
+                                # here. A tap of the talk key, not a dictation.
+  max_hold_s: 120               # provisional (2026-09-19): a hold longer than this ends itself and
+                                # is processed. Guards a lost key-up (tap disabled mid-hold) that
+                                # would otherwise leave the mic open. 2 min is far past any prompt
+                                # Denis dictates; long enough never to cut a real one short.
+  frame_ms: 30                  # analysis window for the silence floor below: the loudest 30 ms
+                                # frame's RMS is what is compared. Short enough that one spoken
+                                # syllable fills a frame, long enough to average out a click.
+  silence_floor_dbfs: -50       # provisional (2026-09-19): if no 30 ms frame's RMS reaches this,
+                                # the clip is silence — no STT, nothing typed, a "heard nothing"
+                                # toast. Speech sits around -30 to -20 dBFS RMS (bench/
+                                # stt_bench.py's quality check); a muted mic or the first-use
+                                # permission prompt yields digital zeros (-200). Room tone on a
+                                # built-in mic is quieter than -50 in a quiet room; unmeasured on
+                                # this mic (that needs the microphone open — Denis's click).
 
 latency_budget_ms:              # acceptance criteria, not aspirations
   release_to_text_p50: 1200
@@ -75,10 +121,25 @@ injection:
   fallback: "pasteboard_paste"  # NSPasteboard write + synthetic Cmd+V — ALSO needs Accessibility
   last_resort: "pasteboard_only" # no grant at all: set pasteboard + toast, Denis pastes.
                                 # Never lose a prompt.
-  fallback_trigger: "TBD"       # char count and/or measured failure — decide in Phase 4
-  chunk_chars: "TBD"            # MEASURE: CGEventKeyboardSetUnicodeString drops/mangles long strings;
-                                # chunking is required, safe chunk size is a Phase 4 measurement
-  inter_chunk_delay_ms: "TBD"   # MEASURE: too fast and the target app drops characters
+  fallback_trigger:             # when the primary path is skipped for pasteboard_paste
+    over_chars: 600             # provisional (2026-09-19): transcripts longer than this paste
+                                # instead of typing (600 chars = 30 chunks, ~150 ms of posting at
+                                # the values below). Any exception from the CGEvent path also
+                                # falls back; Accessibility missing or Secure Input on go straight
+                                # to pasteboard_only. Not measured against a real target app yet.
+  chunk_chars: 20               # provisional (2026-09-19): UTF-16 units per key event. 20 is the
+                                # widely reported point past which apps truncate the string a
+                                # single CGEvent carries (the event itself holds 100 — measured,
+                                # CGEventKeyboardGetUnicodeString round-trip). NOT measured in a
+                                # real target app yet: that needs Accessibility + a focused field.
+  inter_chunk_delay_ms: 5       # provisional (2026-09-19): too fast and the target app drops
+                                # characters. Unmeasured; the Phase 4 gate's byte-identical check
+                                # in Terminal and the Claude Code TUI is what settles it.
+  pasteboard_restore_delay_ms: 150
+                                # provisional (2026-09-19): pasteboard_paste waits this long after
+                                # Cmd+V before putting the previous pasteboard back. The target
+                                # reads the pasteboard asynchronously; restoring sooner pastes the
+                                # OLD contents. Unmeasured.
   restore_pasteboard: true
   secure_input_check: true      # if another app has Secure Input enabled, injection silently
                                 # fails — detect it and fall back to pasteboard with a toast

@@ -48,6 +48,21 @@ HOSTILE_STDIN = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _fresh_hook_clock(monkeypatch):
+    """`hooks.elapsed_ms()` counts from the `dict8.hooks` import, which is process start for
+    a real hook. In a pytest run that import happens at COLLECTION, so once the tests that
+    run first take longer than `hooks.timeout_ms`, the watchdog here fires `os._exit(0)`
+    mid-suite: pytest dies with exit code 0 and no summary line — a vacuous green. Found in
+    U5 (2026-09-19), when the suite first grew past 250 ms. Each test gets the clock a
+    freshly started hook process would have."""
+    import time
+
+    from dict8 import hooks
+
+    monkeypatch.setattr(hooks, "_T0", time.monotonic())
+
+
 @pytest.fixture
 def scratch_cfg(tmp_path):
     """The real config.yml with `paths.db` and `paths.logs` redirected into tmp_path.

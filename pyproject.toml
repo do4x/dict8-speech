@@ -19,6 +19,19 @@ dependencies = [
 classify = [
     "mlx-lm>=0.28 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# `dict8 app` and `dict8 dictate` (U5, 2026-09-19): the menu-bar shell (ADR-001: PyObjC in
+# one process), audio capture, local STT (`stt.backend: mlx-whisper`) and injection. Kept
+# out of the base install for the same reason as `classify`: the UserPromptSubmit hook runs
+# `uv run dict8 hook ...` on every prompt and imports none of this. Run the app with
+# `uv run --extra app dict8 app`.
+app = [
+    "pyobjc-framework-Cocoa>=11 ; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=11 ; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation>=11 ; sys_platform == 'darwin'",
+    "sounddevice>=0.5",
+    "numpy>=2",
+    "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [dependency-groups]
 # Synced by `uv run` by default, never shipped. The gates are integration checks against
@@ -39,3 +52,9 @@ packages = ["dict8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# mlx-whisper 0.4.x declares torch only for its checkpoint converter
+# (mlx_whisper/torch_whisper.py). The transcribe path Dict8 uses never imports it (grep'd
+# 2026-09-19, U5), and it is 526 MB installed. A marker that can never match drops it.
+override-dependencies = ["torch ; sys_platform == 'never'"]

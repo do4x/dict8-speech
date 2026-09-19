@@ -1,12 +1,49 @@
 # bench/stt.md — Phase 0 STT benchmark
 
-**Status: NOT RUN.** No numbers here yet, and none will be invented. The results table below
-is written by `bench/stt_bench.py` on the target Mac; until it runs, `stt.*` in `config.yml`
-stays `TBD` and the Phase 0 gate is open.
+**Status: the real-speech benchmark is NOT RUN.** Its results table is written by
+`bench/stt_bench.py` on the target Mac with Denis's voice; until it runs, the Phase 0/3 gate is
+open. Since 2026-09-19 `stt.*` in `config.yml` holds *provisional* values from the
+synthesized-speech quick run directly below — marked as such, and replaced by this benchmark.
 
 This benchmark could not be run in the session that built the harness: that session ran in a
 Linux container with no microphone and no Apple Silicon. Measuring STT anywhere but the box
 Dict8 runs on would produce a number that is worse than no number.
+
+## Provisional run (synthesized speech)
+
+**2026-09-19, U5. Not the Phase 3 benchmark** — that one needs Denis's voice through a real mic
+and is still unrun. This fills `stt.*` with a *provisional*, measured value so the dictation
+MVP can be tested; `config.yml` marks every value it produced `provisional (2026-09-19)`.
+
+- Clips: macOS `say` reading `bench/scripts.yml` text, `afconvert` to 16 kHz mono 16-bit.
+  `short.wav` = the `3s` script (3.0 s). `long.wav` = the first sentence of `coding_prompt`
+  (9.2 s: "Rename get_user_data to fetch_user_profile … curly braces … quote the label argument").
+- Backend: mlx-whisper 0.4.3 only, Metal, fp16 weights, `language: en`, decoder defaults.
+- `uv run --extra app python bench/stt_quick.py short.wav long.wav --models small.en large-v3-turbo`
+  — each model in a fresh process. "load" = weights + one silent warm-up pass (paid once at
+  launch); "first run" = first real transcription after that; then 3 warm runs.
+
+| model | load + warm-up (cold) | clip | audio | first run | warm runs (ms) | warm median | RTF |
+|---|---|---|---|---|---|---|---|
+| small.en | 2769 ms | short.wav | 3.0 s | 118 ms | 117, 115, 115 | 115 ms | 0.038 |
+| small.en | 2769 ms | long.wav | 9.2 s | 188 ms | 188, 187, 188 | 188 ms | 0.020 |
+| large-v3-turbo | 1274 ms | short.wav | 3.0 s | 345 ms | 340, 338, 334 | 338 ms | 0.111 |
+| large-v3-turbo | 1274 ms | long.wav | 9.2 s | 407 ms | 405, 406, 405 | 405 ms | 0.044 |
+
+Transcripts — **identical between the two models** on both clips:
+
+- short: `Add a retry with exponential back off to the client.`
+- long: `Rename getUserData to fetch user profile everywhere in the usage module. Then wrap the return value in curly braces and quote the label argument.`
+
+**Pick: `small.en`** — ~3x faster warm (115 vs 338 ms; 188 vs 405 ms) for the same words.
+The small.en cold load (2.8 s) is disk-cold `weights.npz`; warm-cache relaunches measured
+240-450 ms (`dict8 dictate`, `dict8 app`). Both models mangle the spoken identifiers the
+same way (`getUserData`, `fetch user profile`) — that is `say`'s pronunciation meeting a
+model, not a difference between models, and exactly what the real-speech run must re-test.
+
+What this run cannot tell you: accuracy on a human voice, a real mic's noise floor, accents,
+or how `medium.en`, whisper.cpp and faster-whisper compare. The numbers that carry over are
+the latency ones.
 
 ## What changed from the seeded plan
 

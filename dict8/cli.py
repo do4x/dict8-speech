@@ -1,6 +1,7 @@
 """`dict8` command line — Phase 1 surface: backfill, usage, tail, reconcile.
 Plus `quota`, the manual weekly check-in (Phase 2's calibration ground truth).
 Plus the classifier (prompts/classify.md), pulled forward from Phase 5 (Denis, 2026-09-15).
+Plus `app` and `dictate` (U5): the dictation MVP, behind the `app` extra, imported lazily.
 
 Invariant 6: no USD figure is printed by any command. `claude-tokens` emits a
 `cost_usd_estimate` field; `reconcile` reads its token columns and drops that one on the
@@ -637,11 +638,72 @@ def cmd_classify_backfill(args, cfg) -> int:
     return 0
 
 
+# ---- dictation (U5) — needs the `app` extra; imported lazily so the base install and the
+# UserPromptSubmit hook never load PyObjC, sounddevice or mlx ----------------------------
+
+APP_EXTRA = "this command needs the `app` extra: run it as `uv run --extra app dict8 ...`"
+
+
+def cmd_app(args, cfg) -> int:
+    try:
+        from dict8 import app as app_mod
+    except ImportError as exc:
+        print(f"app: {APP_EXTRA} ({exc})", file=sys.stderr)
+        return 1
+    return app_mod.run(cfg, exit_after=args.exit_after, dry_run=args.dry_run,
+                       notify=not args.no_notify)
+
+
+def cmd_dictate(args, cfg) -> int:
+    """File -> STT -> inject path, headless. The same `dictation.process` the hotkey runs."""
+    try:
+        from dict8 import dictation
+        from dict8.inject import PATH_NONE, PATH_PB_ONLY, Injector
+        from dict8.stt import STT, read_wav
+        from dict8.ui.toast import toast
+    except ImportError as exc:
+        print(f"dictate: {APP_EXTRA} ({exc})", file=sys.stderr)
+        return 1
+
+    audio, rate = read_wav(args.file)
+    stt = STT(cfg)
+    load_ms = stt.load()
+    if rate != stt.sample_rate:
+        print(f"dictate: {args.file} is {rate} Hz; the model takes {stt.sample_rate} Hz mono "
+              f"16-bit (afconvert -f WAVE -d LEI16@{stt.sample_rate} -c 1 in.aiff out.wav)",
+              file=sys.stderr)
+        return 2
+    audio_ms = len(audio) / rate * 1000
+    if audio_ms < float(cfg.require("audio.min_hold_ms")):
+        dictation.record(cfg, {"source": "file", "outcome": "discarded_short",
+                               "audio_ms": audio_ms})
+        print(f"discarded: {audio_ms:.0f} ms of audio < audio.min_hold_ms")
+        return 0
+    force = {"pasteboard": PATH_PB_ONLY, "none": PATH_NONE, "cgevent": None}[args.inject]
+    injector = Injector(cfg)
+    injector.warm()  # AppKit/Quartz imports are launch cost, not release-to-text
+    t_release = time.perf_counter()
+    out = dictation.process(cfg, stt, injector, audio, audio_ms=audio_ms,
+                            t_release=t_release, source="file", force=force)
+    if out.result.toast:
+        toast(*out.result.toast)
+    timings = {"load_ms": round(load_ms, 1), "audio_ms": round(audio_ms, 1),
+               "stt_ms": round(out.stt_ms, 1), "inject_ms": round(out.result.ms, 1),
+               "release_to_text_ms": round(out.release_to_text_ms, 1),
+               "path": out.result.path, "chars": out.result.chars}
+    if args.json:
+        print(json.dumps({"transcript": out.text, **timings}, ensure_ascii=False))
+    else:
+        print(f"transcript: {out.text}")
+        print("timings:    " + "  ".join(f"{k}={v}" for k, v in timings.items()))
+    return 0
+
+
 # ---- entry point ----------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="dict8", description="Dict8 — usage layer (Phase 1)")
+    p = argparse.ArgumentParser(prog="dict8", description="Dict8 — usage layer and dictation")
     p.add_argument("--config", type=Path, help="override config.yml location")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -711,6 +773,23 @@ def main(argv: list[str] | None = None) -> int:
     cb = sub.add_parser("classify-backfill", help="fill task_type on unclassified turns")
     cb.add_argument("--limit", type=int, help="classify at most N turns (oldest first)")
     cb.set_defaults(func=cmd_classify_backfill)
+
+    ap = sub.add_parser("app", help="run the menu-bar dictation app (needs --extra app)")
+    ap.add_argument("--exit-after", type=float, metavar="SECONDS",
+                    help="quit after this many seconds (smoke test)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="log talk-key events but never open the microphone")
+    ap.add_argument("--no-notify", action="store_true",
+                    help="toasts go to the terminal, the log and the menu only — no banner")
+    ap.set_defaults(func=cmd_app)
+
+    dc = sub.add_parser("dictate", help="headless: WAV file -> STT -> inject (needs --extra app)")
+    dc.add_argument("--file", required=True, type=Path, help="16-bit mono WAV at the model rate")
+    dc.add_argument("--inject", choices=("pasteboard", "cgevent", "none"), default="none",
+                    help="pasteboard: leave the text on the pasteboard only · cgevent: the "
+                         "full primary->fallback chain, TYPES INTO THE FRONTMOST APP · none")
+    dc.add_argument("--json", action="store_true", help="one JSON object: transcript + timings")
+    dc.set_defaults(func=cmd_dictate)
 
     # Hooks bypass argparse entirely (see cmd_hook): its parse errors and its
     # `required=True` subcommand both exit 2, and a hook that exits 2 blocks the prompt.
