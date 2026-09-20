@@ -83,6 +83,7 @@ def test_the_answer_toast_tells_a_denial_from_a_dialog_that_never_showed(ok, sta
 
 
 def test_window_rows_buttons_and_advice(cfg, tmp_path):
+    """The window pushes one state object to its page; this is what the page receives."""
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
     from dict8.ui.window import StatusWindow
 
@@ -90,28 +91,28 @@ def test_window_rows_buttons_and_advice(cfg, tmp_path):
         NSApplicationActivationPolicyAccessory)
     calls: list = []
     w = StatusWindow(cfg, {"grant": calls.append, "preview": lambda: calls.append("p"),
-                           "copy_last": lambda: None, "quit": lambda: None},
+                           "copy_last": lambda: None, "quit": lambda: None,
+                           "check_permissions": lambda: None},
                      stt_model="stt-model", classifier_model="clf-model", mic_label="mic")
     w.set_permissions({"microphone": "not_determined", "accessibility": "denied",
                        "input_monitoring": permissions.GRANTED})
-    mic_btn = w.perm_rows["microphone"][2]
-    assert str(mic_btn.title()) == "Allow…" and not mic_btn.isHidden()
-    assert str(w.perm_rows["accessibility"][2].title()) == "Open Settings"
-    assert w.perm_rows["input_monitoring"][2].isHidden()
-    mic_btn.performClick_(None)                  # the button reaches the handler
+    rows = {r["id"]: r for r in w.data["permissions"]}
+    assert rows["microphone"]["button"] == "Allow…"
+    assert rows["accessibility"]["button"] == "Open Settings"
+    assert rows["input_monitoring"]["button"] is None      # granted: nothing to fix
+    w._action({"action": "grant", "grant": "microphone"})  # the page's button reaches here
     assert calls == ["microphone"]
     w.set_state("idle")                          # loaded, but not usable yet
-    assert str(w.status.stringValue()) == "Almost ready"
-    assert "Microphone and Accessibility" in str(w.status_detail.stringValue())
+    assert w.data["status"]["headline"] == "Almost ready"
+    assert "Microphone and Accessibility" in w.data["status"]["detail"]
     w.set_permissions({g: permissions.GRANTED for g in permissions.GRANTS})
-    assert str(w.status.stringValue()) == "Ready"
+    assert w.data["status"]["headline"] == "Ready"
 
     w.set_advice(chip=None, strength=None, estimate=None, override=None)
-    assert w.advice_row.isHidden() and w.estimate.isHidden()   # no placeholder model
-    w.set_advice(chip="Sonnet 5", strength="s", estimate="est. 1K–3K tokens",
-                 override=None)
-    assert not w.advice_row.isHidden() and "Sonnet 5" in str(w.chip.stringValue())
+    assert (w.data["last"] or {}).get("advice") is None    # no placeholder model
     w.set_last("Typed · 200 ms from release to text", None)
-    assert w.heard.isHidden()
+    w.set_advice(chip="Sonnet 5", strength="s", estimate="est. 1K–3K tokens", override=None)
+    assert w.data["last"]["advice"]["chip"] == "Sonnet 5"
+    assert w.data["last"]["heard"] is None
     png = tmp_path / "w.png"
     assert w.snapshot(str(png)) and png.stat().st_size > 0

@@ -358,6 +358,6 @@ def test_overlay_never_becomes_key_or_main(cfg, tmp_path):
     png = tmp_path / "o.png"
     assert ov.snapshot(str(png)) and png.stat().st_size > 0
     ov.clear_advice()                 # no recommendation -> no chip, not a placeholder
-    assert ov.chip_bg.isHidden() and ov.estimate.isHidden()
+    assert ov.state()["advice"] is None
     ov.hide()
     assert not ov.visible

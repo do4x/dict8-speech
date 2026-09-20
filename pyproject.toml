@@ -31,6 +31,8 @@ app = [
     "pyobjc-framework-Cocoa>=11 ; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=11 ; sys_platform == 'darwin'",
     "pyobjc-framework-AVFoundation>=11 ; sys_platform == 'darwin'",
+    # ADR-003: the UI is React, rendered by WebKit in this same process.
+    "pyobjc-framework-WebKit>=11 ; sys_platform == 'darwin'",
     "sounddevice>=0.5",
     "numpy>=2",
     "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",

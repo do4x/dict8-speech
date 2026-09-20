@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dict8 overlay</title>
+    <script type="module" crossorigin src="./assets/overlay-BDPddHBn.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/tokens-CmxCewuE.js">
+    <link rel="stylesheet" crossorigin href="./assets/tokens-a3ELnOtP.css">
+    <link rel="stylesheet" crossorigin href="./assets/overlay-CD4Heyvv.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // The browser (npm run dev / Playwright) has no desktop behind the page.
+      if (!window.webkit?.messageHandlers?.dict8) document.body.classList.add("dev");
+    </script>
+  </body>
+</html>

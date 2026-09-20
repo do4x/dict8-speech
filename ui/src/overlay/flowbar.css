@@ -1,0 +1,217 @@
+/* The Flow bar. Every animated property is transform or opacity, except the capsule's
+ * width, which is the morph itself (one small element; the reference does the same). */
+
+.flow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  font-family: var(--font);
+}
+
+.flow--top {
+  flex-direction: column;
+}
+
+/* -- the capsule ----------------------------------------------------------------- */
+
+.capsule {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  width: 72px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--capsule);
+  border: 1px solid var(--capsule-edge);
+  box-shadow: var(--shadow-pop);
+  color: var(--flow-ink);
+  /* The morph: a critically damped spring, so it settles without overshooting. */
+  transition:
+    width var(--t-morph) var(--spring),
+    border-color var(--t-fast) ease;
+}
+
+.capsule[data-tone="warn"] {
+  border-color: var(--flow-amber);
+  border-width: 1.5px;
+  color: var(--flow-amber);
+}
+
+.capsule[data-tone="error"] {
+  border-color: var(--flow-red);
+  border-width: 1.5px;
+  color: var(--flow-red);
+}
+
+/* Bars and result share the centre; only one is visible at a time, and they cross-fade.
+ * Both are `max-content` wide so the result can be measured for the capsule's width. */
+.capsule__bars,
+.capsule__result {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max-content;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.capsule__bars {
+  gap: 2.5px;
+  opacity: 0;
+}
+
+.capsule__result {
+  gap: 6px;
+  opacity: 0;
+  white-space: nowrap;
+}
+
+.capsule[data-phase="recording"] .capsule__bars {
+  opacity: 1;
+}
+
+.capsule[data-phase="transcribing"] .capsule__bars {
+  opacity: 0.6;
+}
+
+.capsule[data-phase="result"] .capsule__result {
+  opacity: 1;
+}
+
+.capsule__text {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1;
+}
+
+.bar {
+  width: 2.5px;
+  height: 16px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: scaleY(0.2);
+  transform-origin: center;
+  will-change: transform;
+}
+
+/* Transcribing: a travelling wave, staggered per bar. Constant motion, so it is linear in
+ * feel and runs entirely on the compositor. */
+.capsule[data-phase="transcribing"] .bar {
+  animation: wave 900ms var(--ease-in-out) infinite;
+  animation-delay: calc(var(--i) * 100ms);
+}
+
+@keyframes wave {
+  0%,
+  100% {
+    transform: scaleY(0.2);
+  }
+  50% {
+    transform: scaleY(0.62);
+  }
+}
+
+/* -- the advice tag --------------------------------------------------------------- */
+
+.tag {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 460px;
+  padding: 8px 11px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: var(--tag);
+  border: 1px solid var(--capsule-edge);
+  box-shadow: var(--shadow-pop);
+  color: var(--flow-ink);
+  /* Rises out of the capsule: origin-aware, and never from nothing. */
+  transform-origin: bottom center;
+  animation: tag-in var(--t-enter) var(--ease-out) both;
+}
+
+.flow--top .tag {
+  transform-origin: top center;
+  animation-name: tag-in-top;
+}
+
+@keyframes tag-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+}
+
+@keyframes tag-in-top {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+}
+
+.tag__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.tag__dim {
+  color: var(--flow-ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag__est {
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.tag__override {
+  color: var(--flow-amber);
+  font-weight: 500;
+}
+
+.chip {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--flow-accent);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* -- accessibility ---------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .capsule,
+  .capsule__bars,
+  .capsule__result {
+    transition-duration: 1ms;
+  }
+  .tag {
+    animation: tag-fade var(--t-enter) ease both;
+  }
+  .capsule[data-phase="transcribing"] .bar {
+    animation: none;
+    transform: scaleY(0.35);
+  }
+  @keyframes tag-fade {
+    from {
+      opacity: 0;
+    }
+  }
+}

@@ -180,7 +180,16 @@ class Controller:
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
         from dict8.ui.overlay import Overlay
         from dict8.ui.tray import Tray
+        from dict8.ui import theme, webhost
         from dict8.ui.window import StatusWindow, install_edit_menu
+
+        if not webhost.assets_built():
+            # ADR-003: the interface is built from ui/. Say so loudly rather than opening a
+            # blank panel — a silent no-op is exactly what invariant 7b forbids.
+            say("UI NOT BUILT — run `cd ui && npm install && npm run build`. "
+                f"Expected {webhost.WEB_ROOT}/window.html")
+            self.toast("Dict8: the interface is not built",
+                       "Run `cd ui && npm install && npm run build`, then start Dict8 again.")
 
         app = NSApplication.sharedApplication()
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon
@@ -188,16 +197,18 @@ class Controller:
         mic_label = (str(self.cfg.get("hardware.mic_device"))
                      if self.cfg.get("hardware.mic_device")
                      else "system default input (hardware.mic_device is TBD)")
-        hotkey_label = (f"hold {self.cfg.require('hotkey.push_to_talk')}, "
-                        f"{self.cfg.require('hotkey.cancel')} cancels")
+        hotkey_label = (f"Hold {theme.key_name(str(self.cfg.require('hotkey.push_to_talk')))}"
+                        f" to talk · {theme.key_cap(str(self.cfg.require('hotkey.cancel')))}"
+                        f" cancels")
         self.tray = Tray({"check_permissions": self.check_permissions,
                           "copy_last": self.copy_last, "quit": self.quit,
                           "open_window": self.open_window},
-                         hotkey_label=hotkey_label, mic_label=mic_label)
+                         hotkey_label=hotkey_label)
         install_edit_menu()
         self.window = StatusWindow(
             self.cfg, {"grant": self.ask_from_window, "preview": self.preview,
-                       "copy_last": self.copy_last, "quit": self.quit},
+                       "copy_last": self.copy_last, "quit": self.quit,
+                       "check_permissions": self.check_permissions},
             stt_model=self.stt.model_id,
             classifier_model=str(self.cfg.require("classifier.model")), mic_label=mic_label)
         toast_mod.add_listener(lambda t, b: self.call_main(self.tray.set_error, t))
@@ -207,6 +218,9 @@ class Controller:
             f"host {permissions.host_app()}{', DRY RUN: mic never opened' if self.dry_run else ''})")
 
         self.overlay = Overlay(self.cfg)
+        # The live bars: the newest mic block's level, read on the main thread's meter tick.
+        self.overlay.level_source = lambda: (self.recorder.level() if self.recorder is not None
+                                             else None)
         if demo:
             self._ask_auto = False
         self.refresh_permissions(announce=True, toast_missing=not self._ask_auto)
@@ -514,9 +528,8 @@ class Controller:
                 return
             if clear:
                 self.overlay.clear_advice()
-            if pending or override:
-                self.overlay.set_advice(chip=None, strength=None,
-                                        estimate="est. …" if pending else None,
+            if override:   # pending advice shows nothing: the tag rises when it lands
+                self.overlay.set_advice(chip=None, strength=None, estimate=None,
                                         override=override)
             self.overlay.show_state(state)
         self.call_main(show)

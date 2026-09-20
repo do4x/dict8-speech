@@ -493,6 +493,11 @@ overlay:                        # dict8/ui/overlay.py — the non-activating pan
                                 # short enough to be gone before the next dictation. Unmeasured
                                 # against Denis's reading; the panel never takes focus or clicks,
                                 # so erring long costs screen space, not input.
+  position: "bottom"            # provisional (2026-09-19): "bottom" = centred just above the Dock,
+                                # where Wispr Flow's bar sits and where Claude Code's prompt is in
+                                # a full-height terminal; "top" = just under the menu bar. The
+                                # advice tag always opens away from the screen edge. Presentation
+                                # only; unmeasured against Denis's preference.
 
 window:                         # dict8/ui/window.py — the Dict8 window (Denis, 2026-09-19: "I'd like
                                 # to see the UI"). Status, permissions with the buttons that fix

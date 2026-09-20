@@ -1,0 +1,109 @@
+/* Design tokens for both surfaces: the Flow bar overlay and the Dict8 window.
+ *
+ * Presentation only. config.yml still owns every decision (CLAUDE.md invariant 3).
+ *
+ * Palette: a warm neutral canvas with a terracotta accent — warm like Wispr Flow's hub,
+ * which is the reference for feel, but Dict8's own colors, not their brand. Terracotta
+ * because Dict8 sits next to Claude Code.
+ *
+ * Motion (emilkowalski's skills + Apple's fluid-interface talks):
+ * - the talk key is pressed tens of times a day, so the overlay has NO entrance animation;
+ * - enter/exit use a strong ease-out, never ease-in, and exits are faster than entrances;
+ * - on-screen morphs use a critically damped spring (no overshoot on chrome);
+ * - nothing scales from 0 — entrances start at 0.96 and up;
+ * - only transform/opacity animate, so everything stays off the layout/paint path.
+ */
+
+:root {
+  /* -- warm neutrals ------------------------------------------------------------- */
+  --sand-0: #ffffff;
+  --sand-25: #fdfcfa;
+  --sand-50: #f8f6f2;
+  --sand-100: #f2efe9;
+  --sand-200: #e8e4db;
+  --sand-300: #d9d4c8;
+  --sand-500: #a39c8d;
+  --sand-700: #6b655a;
+  --sand-800: #4a453d;
+  --sand-900: #2e2b26;
+  --sand-950: #1c1a17;
+
+  /* -- accent + status ----------------------------------------------------------- */
+  --accent: #c2603a;
+  --accent-soft: #f6e6de;
+  --accent-ink: #ffffff;
+  --green: #3f9668;
+  --amber: #c8841f;
+  --red: #c4483f;
+
+  /* -- semantic ------------------------------------------------------------------ */
+  --canvas: var(--sand-100);
+  --panel: var(--sand-25);
+  --card: var(--sand-0);
+  --well: var(--sand-50);
+  --ink: var(--sand-900);
+  --ink-2: var(--sand-700);
+  --ink-3: var(--sand-500);
+  --edge: rgba(46, 43, 38, 0.1);
+  --edge-strong: rgba(46, 43, 38, 0.16);
+  --shadow-sm: 0 1px 2px rgba(46, 43, 38, 0.06);
+  --shadow-md: 0 4px 16px rgba(46, 43, 38, 0.08);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.28), 0 2px 8px rgba(0, 0, 0, 0.2);
+
+  /* -- type ---------------------------------------------------------------------- */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-display: ui-serif, "New York", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* -- shape --------------------------------------------------------------------- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+
+  /* -- motion -------------------------------------------------------------------- */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --spring: linear(
+    0, 0.0039, 0.0155, 0.0344 3.5%, 0.1223 6.6%, 0.4664 15.1%, 0.5977, 0.7134,
+    0.8107, 0.8891 28.5%, 0.9501 32.6%, 0.9846 36.9%, 1.0038 41.6%, 1.0122 47.6%,
+    1.0091 56.3%, 1.0013 72.1%, 1
+  );
+  --t-fast: 110ms;
+  --t-enter: 180ms;
+  --t-exit: 150ms;
+  --t-morph: 260ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #16150f;
+    --panel: #1e1c17;
+    --card: #232019;
+    --well: #1a1813;
+    --ink: #f2efe7;
+    --ink-2: #b8b1a3;
+    --ink-3: #837c6e;
+    --edge: rgba(255, 252, 244, 0.09);
+    --edge-strong: rgba(255, 252, 244, 0.16);
+    --accent: #d97a52;
+    --accent-soft: #3a241a;
+    --green: #56b381;
+    --amber: #dfa040;
+    --red: #e2695f;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* The overlay is always dark: it has to read over any app underneath. */
+.flow {
+  --capsule: #08080a;
+  --capsule-edge: rgba(255, 255, 255, 0.16);
+  --tag: rgba(20, 20, 22, 0.97);
+  --flow-ink: #ffffff;
+  --flow-ink-dim: rgba(255, 255, 255, 0.62);
+  --flow-amber: #ffba52;
+  --flow-red: #f06a62;
+  --flow-accent: #e2794f;
+}

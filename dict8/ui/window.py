@@ -1,8 +1,11 @@
 """The Dict8 window: what Dict8 is doing, what it still needs, and a place to try it.
 
-Added 2026-09-19 at Denis's request ("I'd like to see the UI"): one plain window beside the
-tray item, the overlay and the toasts. It is not a settings GUI. `config.yml` stays the
-settings surface (CLAUDE.md), and nothing here writes config.
+Added 2026-09-19 at Denis's request ("I'd like to see the UI"). The interface itself is
+React (ui/src/window), rendered by a WKWebView that fills the window (ADR-003); this module
+owns the window, the state pushed into the page, and the actions the page sends back.
+
+It is not a settings GUI: `config.yml` stays the settings surface (CLAUDE.md), and nothing
+here writes config.
 
 Unlike the overlay, this is an ordinary window that takes focus when clicked. Clicking it
 makes Dict8 the frontmost app, which is what the practice box needs: dictating into the box
@@ -10,13 +13,10 @@ tries the whole path (mic, STT, typing, chip, estimate) without touching Claude 
 Dictation types into whatever app is frontmost at press time, so clicking back into Claude
 Code sends the next dictation there.
 
-Sections, top to bottom:
-- status and the talk key;
-- permissions, one row per grant, with the button that fixes it;
-- the two local models;
-- the last dictation and the overlay's advice;
-- the usage meter;
-- the practice box.
+Python owns every string the page shows — `fmt_tokens`, the estimator's wording, the
+permission words — so a labeled gap (a TBD, an unset threshold, a refused estimate) reaches
+the screen exactly as the layer that knows about it wrote it (invariant 3). The page decides
+only where things sit.
 
 The last transcript shown here is the in-memory copy (`Controller.last_text`), and it is
 never written anywhere.
@@ -26,238 +26,163 @@ Main thread only. `dict8.app` marshals every call through `AppHelper.callAfter`.
 
 from __future__ import annotations
 
-import objc
-from AppKit import (NSApplication, NSBackingStoreBuffered, NSBezelBorder,
-                    NSBitmapImageFileTypePNG, NSBox, NSBoxSeparator, NSButton, NSColor, NSFont,
-                    NSLayoutAttributeCenterY, NSLayoutAttributeLeading, NSMakeRect, NSMenu,
-                    NSMenuItem, NSScrollView, NSStackView, NSTextField, NSTextView,
-                    NSUserInterfaceLayoutOrientationHorizontal,
-                    NSUserInterfaceLayoutOrientationVertical, NSViewWidthSizable, NSWindow,
-                    NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
-                    NSWindowStyleMaskTitled)
-from Foundation import NSObject
+import logging
+import re
+
+from AppKit import (NSApplication, NSBackingStoreBuffered, NSMakeRect, NSMenu, NSMenuItem,
+                    NSView, NSViewMinYMargin, NSViewWidthSizable, NSWindow,
+                    NSWindowStyleMaskClosable, NSWindowStyleMaskFullSizeContentView,
+                    NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskResizable,
+                    NSWindowStyleMaskTitled, NSWindowTitleHidden)
 
 from dict8 import permissions
+from dict8.ui import theme, webhost
 
-# Layout, in points. Presentation, not thresholds.
-WIDTH = 520
-INSET = 20
-PRACTICE_H = 72
+log = logging.getLogger(__name__)
 
-# How config's key names read on screen. Config names the key; this only spells it.
-KEY_NAMES = {
-    "right_option": "the right ⌥ Option key",
-    "left_option": "the left ⌥ Option key",
-    "right_command": "the right ⌘ Command key",
-    "right_control": "the right ⌃ Control key",
-    "right_shift": "the right ⇧ Shift key",
-    "escape": "Esc",
+WIDTH, HEIGHT = 980, 720          # the page is responsive; this is where it opens
+MIN_W, MIN_H = 720, 520
+TITLE_STRIP = 28                  # keep in step with `.hub { padding-top }` in hub.css
+
+STATUS = {   # tray state -> headline
+    "loading": "Loading the speech model…",
+    "idle": "Ready",
+    "recording": "Recording…",
+    "transcribing": "Transcribing…",
+    "error": "Needs attention",
+    "fallback": "On the clipboard: press ⌘V",
 }
 
-STATUS = {   # tray state -> (headline, color name)
-    "loading": ("Loading the speech model…", "systemOrangeColor"),
-    "idle": ("Ready", "systemGreenColor"),
-    "recording": ("Recording…", "systemRedColor"),
-    "transcribing": ("Transcribing…", "systemBlueColor"),
-    "error": ("Needs attention", "systemOrangeColor"),
-    "fallback": ("On the clipboard: press ⌘V", "systemOrangeColor"),
+PERM_WORDS = {   # grant state -> (words, button title or None)
+    permissions.GRANTED: ("Granted", None),
+    "not_determined": ("Not asked yet", "Allow…"),
+    "denied": ("Not granted", "Open Settings"),
+    "restricted": ("Blocked by a profile", "Open Settings"),
+    "unknown": ("Could not be read", "Open Settings"),
 }
 
-PERM_STATES = {  # grant state -> (mark, words, color name, button title or None)
-    permissions.GRANTED: ("✓", "granted", "systemGreenColor", None),
-    "not_determined": ("!", "not asked yet", "systemOrangeColor", "Allow…"),
-    "denied": ("✕", "not granted", "systemRedColor", "Open Settings"),
-    "restricted": ("✕", "blocked by a profile", "systemRedColor", "Open Settings"),
-    "unknown": ("?", "could not be read", "systemOrangeColor", "Open Settings"),
-}
+_NUMBER = re.compile(r"^(?P<num>[\d.,]+[KMB]?)\s+tokens?\b\s*(?P<rest>.*)$")
 
 
-def _color(name: str):
-    return getattr(NSColor, name)()
+def metric(line: str) -> dict:
+    """A meter line as a big number and its caption. A line with no token count in it keeps
+    its words and shows a dash — never a made-up zero (invariant 3)."""
+    label, _, value = line.partition(": ")
+    if not value:
+        label, value = "", line
+    m = _NUMBER.match(value)
+    if m:
+        rest = m.group("rest")
+        return {"value": m.group("num"),
+                "caption": f"{label} {rest}".strip(), "numeric": True}
+    caption = f"{label} · {value}" if label else value
+    return {"value": "—", "caption": caption, "numeric": False}
 
 
-def _label(text: str = "", *, size: float = 13, bold: bool = False, dim: bool = False,
-           wrap: bool = False) -> NSTextField:
-    f = (NSTextField.wrappingLabelWithString_(text) if wrap
-         else NSTextField.labelWithString_(text))
-    f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
-    f.setTextColor_(NSColor.secondaryLabelColor() if dim else NSColor.labelColor())
-    f.setSelectable_(wrap)
-    if wrap:
-        f.setPreferredMaxLayoutWidth_(WIDTH)
-    return f
+class _DragStrip(NSView):
+    """The band across the top of the window, and the only thing that drags it.
 
+    The window is `FullSizeContentView` with a transparent title bar, so the WKWebView is
+    the entire content view and swallows the mouse events that would otherwise drag the
+    window by its title bar. CSS cannot give them back: `-webkit-app-region` is a
+    Chromium/Electron extension that WebKit does not implement, prefix or no prefix, so it
+    is silently ignored.
 
-def _row(*views, spacing: float = 8) -> NSStackView:
-    r = NSStackView.stackViewWithViews_(list(views))
-    r.setOrientation_(NSUserInterfaceLayoutOrientationHorizontal)
-    r.setAlignment_(NSLayoutAttributeCenterY)
-    r.setSpacing_(spacing)
-    return r
+    So the drag is done here, natively, by handing the real mouse-down straight to
+    `performWindowDragWithEvent:` -- the window server then runs the drag, with snapping
+    and Spaces handling, until the button comes up. Measured on this machine, 2026-09-20:
+    `mouseDownCanMoveWindow` is *not* an alternative. With the web view in the content
+    view AppKit never even calls it (the mouse-down is delivered straight to this view
+    instead), and the window does not move, with or without
+    `setMovableByWindowBackground_`. Only this path moved the window.
 
+    Passing the event we were given is also what keeps this honest: there is no round trip
+    through the page and no `NSApp.currentEvent()` to go stale underneath it.
 
-def _separator() -> NSBox:
-    b = NSBox.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, 1))
-    b.setBoxType_(NSBoxSeparator)
-    b.widthAnchor().constraintEqualToConstant_(WIDTH).setActive_(True)
-    return b
+    It draws nothing, and it costs the page nothing: `.hub` reserves exactly this strip
+    with `padding-top`, so there is no page content underneath it. Full width is safe --
+    `NSTitlebarContainerView` is a sibling *above* the content view, so the traffic lights
+    hit-test first and keep their clicks (verified the same day).
+    """
 
-
-class _Target(NSObject):
-    """ObjC target for the window's buttons; forwards to plain Python callables."""
-
-    def initWithHandlers_(self, handlers):
-        self = objc.super(_Target, self).init()
-        if self is None:
-            return None
-        self.handlers = handlers
-        return self
-
-    def grant_(self, sender):
-        self.handlers["grant"](permissions.GRANTS[int(sender.tag())])
-
-    def preview_(self, sender):
-        self.handlers["preview"]()
-
-    def copyLast_(self, sender):
-        self.handlers["copy_last"]()
-
-    def clearPractice_(self, sender):
-        self.handlers["clear_practice"]()
-
-    def quit_(self, sender):
-        self.handlers["quit"]()
+    def mouseDown_(self, event):
+        self.window().performWindowDragWithEvent_(event)
 
 
 class StatusWindow:
     def __init__(self, cfg, handlers: dict, *, stt_model: str, classifier_model: str,
                  mic_label: str) -> None:
-        handlers = {"clear_practice": self.clear_practice, **handlers}
-        self.target = _Target.alloc().initWithHandlers_(handlers)
+        self.handlers = handlers
         talk = str(cfg.require("hotkey.push_to_talk"))
         cancel = str(cfg.require("hotkey.cancel"))
-        self.talk_key = KEY_NAMES.get(talk, talk)
-        cancel_key = KEY_NAMES.get(cancel, cancel)
-
-        style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                 | NSWindowStyleMaskMiniaturizable)
-        w = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, WIDTH + 2 * INSET, 600), style, NSBackingStoreBuffered, False)
-        w.setTitle_("Dict8")
-        w.setReleasedWhenClosed_(False)   # closing hides it; the menu reopens it
-        self.win = w
+        self.talk_key = theme.key_name(talk)
         self._placed = False
         self._state, self._detail = "loading", ""
         self._missing: list[str] = []
 
-        views: list = []
-
-        def add(*vs):
-            views.extend(vs)
-
-        # -- status ------------------------------------------------------------------
-        self.status_dot = _label("●", size=15)
-        self.status = _label("", size=15, bold=True)
-        self.status_detail = _label("", dim=True)
-        add(_row(self.status_dot, self.status, self.status_detail, spacing=6))
-        add(_label(f"Hold {self.talk_key}, speak, then let go: the text is typed where your "
-                   f"cursor is. {cancel_key} while holding cancels.", wrap=True))
-        self.notice = _label("Last message: none", dim=True, wrap=True)
-        add(self.notice, _separator())
-
-        # -- permissions -------------------------------------------------------------
-        add(_label("Permissions", bold=True),
-            _label(f"While Dict8 runs from a terminal, macOS lists these under "
-                   f"{permissions.host_name()}, not Dict8.", dim=True, wrap=True))
-        self.perm_rows: dict[str, tuple] = {}
-        for i, g in enumerate(permissions.GRANTS):
-            mark = _label("?", bold=True)
-            name = _label(permissions.LABELS[g], bold=True)
-            state = _label("", dim=True)
-            btn = NSButton.buttonWithTitle_target_action_("Allow…", self.target, "grant:")
-            btn.setTag_(i)
-            add(_row(mark, name, state, btn))
-            add(_label(f"    Needed {permissions.PURPOSE[g]}.", dim=True, size=12))
-            self.perm_rows[g] = (mark, state, btn)
-        add(_separator())
-
-        # -- models ------------------------------------------------------------------
-        add(_label("Models (run on this Mac, nothing leaves it)", bold=True))
-        self.models = {
-            "stt": (_label(f"Speech to text: {stt_model}", size=12), _label("loading…", dim=True, size=12)),
-            "classifier": (_label(f"Model picker: {classifier_model}", size=12),
-                           _label("loading…", dim=True, size=12)),
+        self.data: dict = {
+            "status": {"state": "loading", "headline": STATUS["loading"], "detail": ""},
+            "keys": {"talk": theme.key_cap(talk), "cancel": theme.key_cap(cancel)},
+            "notice": None,
+            "last": None,
+            "permissions": [
+                {"id": g, "label": permissions.LABELS[g], "state": "checking",
+                 "words": "Checking…", "purpose": permissions.PURPOSE[g], "button": None}
+                for g in permissions.GRANTS],
+            "hostName": permissions.host_name(),
+            "models": [
+                {"id": "stt", "title": "Speech to text", "model": stt_model,
+                 "status": "Loading…", "ok": None},
+                {"id": "classifier", "title": "Model picker", "model": classifier_model,
+                 "status": "Loading…", "ok": None}],
+            "mic": mic_label,
+            "usage": {"session": metric("Session: waiting for the first scan…"),
+                      "since": metric("Since last dictation: no dictation yet"),
+                      "burn": ""},
         }
-        for a, b in self.models.values():
-            add(_row(a, b, spacing=6))
-        add(_label(f"Microphone: {mic_label}", dim=True, size=12), _separator())
 
-        # -- last dictation ----------------------------------------------------------
-        add(_label("Last dictation", bold=True))
-        self.last = _label("None yet.", dim=True, wrap=True)
-        self.heard = _label("", wrap=True)
-        self.chip = _label("", bold=True)
-        self.chip.setTextColor_(NSColor.systemBlueColor())
-        self.strength = _label("", dim=True, size=12)
-        self.estimate = _label("", size=12)
-        self.override = _label("", size=12)
-        self.override.setTextColor_(NSColor.systemOrangeColor())
-        self.advice_row = _row(self.chip, self.strength)
-        add(self.last, self.heard, self.advice_row, self.estimate, self.override, _separator())
+        style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                 | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                 | NSWindowStyleMaskFullSizeContentView)
+        w = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, WIDTH, HEIGHT), style, NSBackingStoreBuffered, False)
+        w.setTitle_("Dict8")
+        w.setTitleVisibility_(NSWindowTitleHidden)
+        w.setTitlebarAppearsTransparent_(True)   # the page draws under it; _DragStrip drags it
+        w.setMinSize_((MIN_W, MIN_H))
+        w.setReleasedWhenClosed_(False)          # closing hides it; the menu reopens it
+        self.win = w
 
-        # -- usage -------------------------------------------------------------------
-        add(_label("Usage (tokens, not dollars)", bold=True))
-        self.session = _label("Session: waiting for the first scan…", size=12)
-        self.since = _label("", size=12)
-        self.burn = _label("", dim=True, size=12, wrap=True)
-        add(self.session, self.since, self.burn, _separator())
+        self.host = webhost.WebHost("window", NSMakeRect(0, 0, WIDTH, HEIGHT),
+                                    on_action=self._action)
+        # The web view fills the window; the drag strip is added after it, so it sits above
+        # it and hit-tests first.
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, HEIGHT))
+        content.addSubview_(self.host.view)
+        self.drag = _DragStrip.alloc().initWithFrame_(
+            NSMakeRect(0, HEIGHT - TITLE_STRIP, WIDTH, TITLE_STRIP))
+        self.drag.setAutoresizingMask_(NSViewWidthSizable | NSViewMinYMargin)
+        content.addSubview_(self.drag)
+        w.setContentView_(content)
+        self._push()
 
-        # -- practice ----------------------------------------------------------------
-        add(_label("Try it here", bold=True),
-            _label(f"Click in the box, hold {self.talk_key}, speak, let go. Click back into "
-                   f"Claude Code to dictate there.", dim=True, wrap=True))
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, PRACTICE_H))
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(NSBezelBorder)
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, PRACTICE_H))
-        tv.setRichText_(False)
-        tv.setFont_(NSFont.systemFontOfSize_(13))
-        tv.setAutoresizingMask_(NSViewWidthSizable)
-        scroll.setDocumentView_(tv)
-        scroll.widthAnchor().constraintEqualToConstant_(WIDTH).setActive_(True)
-        scroll.heightAnchor().constraintEqualToConstant_(PRACTICE_H).setActive_(True)
-        self.practice = tv
-        add(scroll)
+    # -- the page's actions ----------------------------------------------------------------
 
-        add(_row(
-            NSButton.buttonWithTitle_target_action_("Preview overlay", self.target, "preview:"),
-            NSButton.buttonWithTitle_target_action_("Copy last transcript", self.target,
-                                                    "copyLast:"),
-            NSButton.buttonWithTitle_target_action_("Clear box", self.target,
-                                                    "clearPractice:"),
-            NSButton.buttonWithTitle_target_action_("Quit Dict8", self.target, "quit:")))
+    def _action(self, payload: dict) -> None:
+        action = payload.get("action")
+        if action == "grant":
+            self.handlers["grant"](str(payload.get("grant")))
+        elif action == "dismiss_notice":
+            self.set_notice(None)
+        elif action in ("preview", "copy_last", "check_permissions", "quit"):
+            self.handlers[action]()
+        else:
+            log.debug("window: ignored action %r", payload)
 
-        stack = NSStackView.stackViewWithViews_(views)
-        stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
-        stack.setAlignment_(NSLayoutAttributeLeading)
-        stack.setSpacing_(6)
-        stack.setEdgeInsets_((INSET, INSET, INSET, INSET))
-        w.setContentView_(stack)
-        self.stack = stack
-        self.set_state("loading")
-        self.set_advice(chip=None, strength=None, estimate=None, override=None)
-        self._fit()
+    def _push(self) -> None:
+        self.host.push(self.data)
 
-    # -- geometry / visibility -----------------------------------------------------------
-
-    def _fit(self) -> None:
-        self.stack.layoutSubtreeIfNeeded()
-        size = self.stack.fittingSize()
-        top = self.win.frame().origin.y + self.win.frame().size.height
-        self.win.setContentSize_((WIDTH + 2 * INSET, size.height))
-        if self._placed:   # grow downwards, keep the title bar where the user put it
-            f = self.win.frame()
-            self.win.setFrameTopLeftPoint_((f.origin.x, top))
+    # -- geometry / visibility -------------------------------------------------------------
 
     def show(self) -> None:
         if not self._placed:
@@ -265,95 +190,87 @@ class StatusWindow:
             self._placed = True
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.win.makeKeyAndOrderFront_(None)
-        self.win.makeFirstResponder_(self.practice)
 
     @property
     def visible(self) -> bool:
         return bool(self.win.isVisible())
 
     def snapshot(self, path: str) -> bool:
-        """The window's own pixels, title bar included, to a PNG — no Screen Recording grant."""
-        view = self.win.contentView().superview() or self.win.contentView()
-        view.layoutSubtreeIfNeeded()
-        rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
-        if rep is None:
-            return False
-        view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
-        data = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
-        return bool(data is not None and data.writeToFile_atomically_(path, True))
+        """The window's own pixels to a PNG — WebKit renders it, so no Screen Recording
+        grant is involved."""
+        return self.host.snapshot(path)
 
-    # -- content -------------------------------------------------------------------------
+    # -- content ---------------------------------------------------------------------------
 
     def set_state(self, state: str, detail: str = "") -> None:
         self._state, self._detail = state, detail
-        headline, color = STATUS.get(state, (state, "systemGrayColor"))
+        headline = STATUS.get(state, state)
         if state == "idle" and self._missing:   # loaded, but a grant still blocks dictation
-            headline, color = "Almost ready", "systemOrangeColor"
-            detail = detail or ("allow " + " and ".join(permissions.LABELS[g]
-                                                        for g in self._missing) + " below")
-        self.status.setStringValue_(headline)
-        self.status_dot.setTextColor_(_color(color))
-        self.status_detail.setStringValue_(detail)
-        self._fit()
+            headline = "Almost ready"
+            detail = detail or ("Allow " + " and ".join(permissions.LABELS[g]
+                                                        for g in self._missing) + " to dictate.")
+        self.data["status"] = {"state": state, "headline": headline,
+                               "detail": detail[:1].upper() + detail[1:] if detail else ""}
+        self._push()
 
-    def set_notice(self, text: str) -> None:
-        self.notice.setStringValue_(f"Last message: {text}")
-        self._fit()
+    def set_notice(self, text: str | None) -> None:
+        self.data["notice"] = text or None
+        self._push()
+
+    def dismiss_notice(self) -> None:
+        self.set_notice(None)
 
     def set_permissions(self, states: dict[str, str]) -> None:
         self._missing = permissions.missing(states)
-        for g, (mark, state, btn) in self.perm_rows.items():
-            m, words, color, button = PERM_STATES.get(states.get(g, "unknown"),
-                                                      PERM_STATES["unknown"])
-            mark.setStringValue_(m)
-            mark.setTextColor_(_color(color))
-            state.setStringValue_(words)
-            btn.setHidden_(button is None)
-            if button:
-                btn.setTitle_(button)
-        self.set_state(self._state, self._detail)
+        rows = []
+        for g in permissions.GRANTS:
+            state = states.get(g, "unknown")
+            words, button = PERM_WORDS.get(state, PERM_WORDS["unknown"])
+            rows.append({"id": g, "label": permissions.LABELS[g], "state": state,
+                         "words": words, "purpose": permissions.PURPOSE[g],
+                         "button": button})
+        self.data["permissions"] = rows
+        self.set_state(self._state, self._detail)   # pushes
 
     def set_model(self, kind: str, text: str, ok: bool | None) -> None:
         """ok: True ready, False failed/unavailable, None still loading."""
-        label = self.models[kind][1]
-        label.setStringValue_(text)
-        label.setTextColor_(NSColor.secondaryLabelColor() if ok is None
-                            else _color("systemGreenColor") if ok
-                            else _color("systemOrangeColor"))
-        self._fit()
+        for row in self.data["models"]:
+            if row["id"] == kind:
+                row["status"] = text[:1].upper() + text[1:] if text else text
+                row["ok"] = ok
+        self._push()
 
     def set_last(self, summary: str, heard: str | None) -> None:
-        self.last.setStringValue_(summary)
-        self.heard.setStringValue_(f"“{heard}”" if heard else "")
-        self.heard.setHidden_(not heard)
-        self._fit()
+        advice = (self.data["last"] or {}).get("advice")
+        self.data["last"] = {"summary": summary, "heard": heard, "advice": advice}
+        self._push()
 
     def set_advice(self, *, chip: str | None, strength: str | None, estimate: str | None,
                    override: str | None) -> None:
         """Mirrors the overlay: a None hides its line, never a placeholder model."""
-        self.chip.setStringValue_(f"Recommended: {chip}" if chip else "")
-        self.strength.setStringValue_(strength or "")
-        self.advice_row.setHidden_(not chip)
-        self.estimate.setStringValue_(estimate or "")
-        self.estimate.setHidden_(not estimate)
-        self.override.setStringValue_(override or "")
-        self.override.setHidden_(not override)
-        self._fit()
+        advice = {k: v for k, v in (("chip", chip), ("strength", strength),
+                                    ("estimate", estimate), ("override", override)) if v}
+        last = self.data["last"] or {"summary": "", "heard": None}
+        last["advice"] = advice or None
+        self.data["last"] = last if (last["summary"] or last["heard"] or advice) else None
+        self._push()
 
     def set_meter(self, session: str, since: str, burn: str) -> None:
-        self.session.setStringValue_(session)
-        self.since.setStringValue_(since)
-        self.burn.setStringValue_(burn)
-        self._fit()
+        self.data["usage"] = {"session": metric(session), "since": metric(since),
+                              "burn": burn}
+        self._push()
 
     def clear_practice(self) -> None:
-        self.practice.setString_("")
+        """The page owns the practice box's text; clearing it is a page-side action."""
+        self.host._eval("document.querySelector('.practice') && "
+                        "(document.querySelector('.practice').value = '')")
 
 
 def install_edit_menu() -> None:
     """A main menu with Edit, so ⌘V / ⌘C / ⌘A / ⌘Z work in the practice box. Dict8 has no
     Dock icon, so the menu bar never shows it, but AppKit still routes key equivalents
-    through it. Without it, the paste fallback could not land in the practice box."""
+    through it — including into the web view. Without it, the paste fallback could not land
+    in the practice box."""
     app = NSApplication.sharedApplication()
     main = NSMenu.alloc().init()
     app_item = NSMenuItem.alloc().init()

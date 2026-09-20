@@ -1,0 +1,39 @@
+/* The overlay page is a transparent, click-through canvas: the panel behind it is
+ * borderless and ignores mouse events, and WKWebView draws no background. Only the capsule
+ * and its tag are visible, and they sit at the bottom (or top) centre. */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+#root {
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  pointer-events: none; /* clicks pass through to whatever is underneath */
+}
+
+.flow--bottom {
+  margin-top: auto;
+  justify-content: flex-end;
+}
+
+.flow--top {
+  margin-bottom: auto;
+}
+
+/* In a browser (npm run dev / Playwright) there is no desktop behind the page, so a
+ * checkerboard makes the transparent canvas legible while designing. */
+@media screen and (min-width: 0px) {
+  body.dev {
+    background:
+      repeating-conic-gradient(#d8d4cc 0% 25%, #eceae4 0% 50%) 50% / 24px 24px;
+  }
+}

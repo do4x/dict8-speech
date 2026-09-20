@@ -10,3 +10,9 @@ __pycache__/
 
 # pytest scratch
 .pytest_cache/
+
+# The React UI (ADR-003): source in ui/, built into dict8/ui/web/
+ui/node_modules/
+ui/.vite/
+ui/dist/
+ui/tsconfig.tsbuildinfo

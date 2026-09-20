@@ -1,65 +1,86 @@
-"""The overlay: a small panel at the top-center of the screen with the cursor, shown on
-the talk key, that NEVER takes focus.
+"""The overlay: the Flow bar, drawn by React (ui/src/overlay) in a WKWebView inside a panel
+that NEVER takes focus.
 
-Injection types into the frontmost app. A panel that became key or activated Dict8 would
-make Dict8 the frontmost app and the next type-out would land in the overlay — or nowhere —
-with no error anywhere: a silent failure (invariant 7b's category). So every property that
-could hand this panel focus is pinned off, in the class and on the instance:
+Injection types into the frontmost app. If this panel became key, or activated Dict8, Dict8
+would become the frontmost app and the next type-out would land in the overlay, or nowhere,
+with no error anywhere. That is a silent failure (invariant 7b's category). So every property
+that could hand this panel focus is pinned off, in the class and on the instance:
 
 - `NSWindowStyleMaskNonactivatingPanel`: showing or clicking it never activates Dict8;
 - `canBecomeKeyWindow` / `canBecomeMainWindow` return False (tests call `makeKeyWindow()`
   and check it is refused);
-- `ignoresMouseEvents`: clicks pass through to whatever is underneath;
+- `ignoresMouseEvents`: clicks pass through the panel — including the transparent margin
+  around the capsule — to whatever is underneath;
 - shown with `orderFrontRegardless()`, never `makeKeyAndOrderFront_`;
-- `hidesOnDeactivate` off — Dict8 is never the active app, so an NSPanel's default
-  (hide when the app deactivates) would keep it invisible;
+- `hidesOnDeactivate` off: Dict8 is never the active app, so an NSPanel's default (hide when
+  the app deactivates) would keep it invisible;
 - joins all Spaces and full-screen apps, and stays out of the window cycle.
 
-What it shows (the caller decides the text; this module only lays it out): the state line,
-the recommended model chip with its strength line, the estimate range with n, and the
-spoken override. Recommendation and estimate live HERE, next to the prompt, and are never
-part of the injected text (invariant 1). Auto-dismissed after `overlay.dismiss_after_s`.
+The web view is only a renderer: the panel refuses key status, so nothing in the page can
+take first responder, and the page sets `pointer-events: none` besides.
 
-Drawn with plain views that paint their own rounded background (no NSVisualEffectView), so
-`snapshot()` can render exactly what is on screen to a PNG without screen-recording access.
+This module owns *what* is shown; ui/src/overlay owns how it looks:
+
+- recording: Python maps the microphone's dBFS to 0..1 against `audio.silence_floor_dbfs`
+  and pushes it `METER_HZ` times a second down a channel that does not re-render React.
+  Flat bars mean "Dict8 would call this silence", which is worth seeing while you speak
+  rather than after you let go;
+- transcribing: the same bars, dimmed, in a travelling wave;
+- the result: a glyph and a word, with an amber ring for the clipboard fallback and a red
+  one for a failure;
+- the advice: the model chip, its strength line, the estimate and any spoken override, in a
+  tag that rises out of the capsule. Recommendation and estimate live HERE, beside the
+  prompt, and are never part of the injected text (invariant 1). No recommendation means no
+  chip, never a placeholder (invariant 2).
+
+The panel is shown on key-down with no animation and dismissed `overlay.dismiss_after_s`
+after the last result or advice. It never auto-dismisses while recording or transcribing: a
+long dictation keeps its bars. `audio.max_hold_s` plus the dismiss delay is only a backstop
+against a lost state.
 
 Main thread only; `dict8.app` marshals every call through `AppHelper.callAfter`.
 """
 
 from __future__ import annotations
 
-import objc
-from AppKit import (NSApplication, NSBackingStoreBuffered, NSBezierPath,
-                    NSBitmapImageFileTypePNG, NSColor, NSEvent, NSFont, NSMakeRect, NSPanel,
-                    NSScreen, NSStatusWindowLevel, NSTextField, NSView,
+import logging
+
+from AppKit import (NSApplication, NSBackingStoreBuffered, NSColor, NSEvent, NSMakeRect,
+                    NSPanel, NSScreen, NSStatusWindowLevel,
                     NSWindowCollectionBehaviorCanJoinAllSpaces,
                     NSWindowCollectionBehaviorFullScreenAuxiliary,
                     NSWindowCollectionBehaviorIgnoresCycle,
                     NSWindowCollectionBehaviorStationary, NSWindowStyleMaskBorderless,
                     NSWindowStyleMaskNonactivatingPanel)
-from Foundation import NSPointInRect, NSTimer
+from Foundation import NSPointInRect, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
-# Layout, in points. Presentation, not thresholds.
-PAD = 14
-GAP = 6
-TOP_MARGIN = 12
-MIN_W, MAX_W = 280, 560
-RADIUS = 12
-CHIP_PAD_X, CHIP_PAD_Y = 8, 2
+from dict8.ui import webhost
 
-STATE_TEXT = {
-    "recording": "● Recording…",
-    "transcribing": "◌ Transcribing…",
-    "typed": "✓ Typed",
-    "sent": "✓ Typed and sent",
-    "pasted": "✓ Pasted",
-    "clipboard": "⎘ On the clipboard — press ⌘V",
-    "cancelled": "✕ Cancelled — nothing typed",
-    "nothing": "Heard nothing — nothing typed",
-    "demo": "Demo — text not typed (injection off)",
-    "preview": "Preview — nothing typed",
-    "error": "⚠ Dictation failed",
+log = logging.getLogger(__name__)
+
+# The panel is a fixed, transparent canvas; the page centres the capsule in it and draws its
+# own shadow. Presentation, not thresholds.
+CANVAS_W, CANVAS_H = 620, 260
+SCREEN_MARGIN = 2      # the page's own padding puts the capsule ~16 pt further in
+METER_HZ = 30          # level pushes per second while recording
+METER_RANGE_DB = 40    # bars span silence_floor_dbfs .. floor + this
+
+# state -> (glyph in ui/src/overlay/Glyph.tsx, words, tone). "warn" is the amber ring,
+# "error" the red one.
+STATES = {
+    "recording": (None, "", "plain"),
+    "transcribing": (None, "", "plain"),
+    "typed": ("check", "Typed", "plain"),
+    "sent": ("send", "Typed and sent", "plain"),
+    "pasted": ("check", "Pasted", "plain"),
+    "clipboard": ("clipboard", "On the clipboard — press ⌘V", "warn"),
+    "cancelled": ("x", "Cancelled — nothing typed", "plain"),
+    "nothing": ("mute", "Heard nothing — nothing typed", "plain"),
+    "demo": ("eye", "Demo — text not typed", "plain"),
+    "preview": ("eye", "Preview — nothing typed", "plain"),
+    "error": ("alert", "Dictation failed", "error"),
 }
+LIVE = ("recording", "transcribing")
 
 
 class OverlayPanel(NSPanel):
@@ -72,41 +93,25 @@ class OverlayPanel(NSPanel):
         return False
 
 
-class RoundedView(NSView):
-    """Paints a filled rounded rect behind its subviews."""
-
-    def initWithFrame_fill_radius_(self, frame, fill, radius):
-        self = objc.super(RoundedView, self).initWithFrame_(frame)
-        if self is None:
-            return None
-        self.fill = fill
-        self.radius = radius
-        return self
-
-    def drawRect_(self, rect):
-        self.fill.setFill()
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            self.bounds(), self.radius, self.radius).fill()
-
-
-def _label(size: float, *, bold: bool = False, color=None) -> NSTextField:
-    f = NSTextField.labelWithString_("")
-    f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
-    f.setTextColor_(color or NSColor.whiteColor())
-    f.setDrawsBackground_(False)
-    f.setBezeled_(False)
-    f.setEditable_(False)
-    f.setSelectable_(False)
-    return f
-
-
 class Overlay:
     def __init__(self, cfg) -> None:
         self.dismiss_after_s = float(cfg.require("overlay.dismiss_after_s"))
+        self.position = str(cfg.require("overlay.position"))
+        if self.position not in ("top", "bottom"):
+            raise ValueError(f"overlay.position must be top or bottom, not {self.position!r}")
+        self.floor_db = float(cfg.require("audio.silence_floor_dbfs"))
+        self.backstop_s = float(cfg.require("audio.max_hold_s")) + self.dismiss_after_s
+        # Set by the app: returns the microphone's current level in dBFS, or None.
+        self.level_source = None
         self._gen = 0
+        self._state: str | None = None
+        self._detail = ""
+        self._advice: dict = {}
+        self._meter = None
+
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         p = OverlayPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, MIN_W, 60), style, NSBackingStoreBuffered, False)
+            NSMakeRect(0, 0, CANVAS_W, CANVAS_H), style, NSBackingStoreBuffered, False)
         p.setLevel_(NSStatusWindowLevel)
         p.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces
                                  | NSWindowCollectionBehaviorStationary
@@ -118,38 +123,74 @@ class Overlay:
         p.setFloatingPanel_(True)
         p.setOpaque_(False)
         p.setBackgroundColor_(NSColor.clearColor())
-        p.setHasShadow_(True)
+        p.setHasShadow_(False)          # the capsule and tag cast their own, in CSS
         p.setReleasedWhenClosed_(False)
         self.panel = p
 
-        self.root = RoundedView.alloc().initWithFrame_fill_radius_(
-            NSMakeRect(0, 0, MIN_W, 60),
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.11, 0.11, 0.13, 0.94), RADIUS)
-        p.setContentView_(self.root)
+        self.host = webhost.WebHost("overlay", NSMakeRect(0, 0, CANVAS_W, CANVAS_H),
+                                    on_action=self._action, transparent=True)
+        p.setContentView_(self.host.view)
+        self._push()
 
-        dim = NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.72)
-        self.state = _label(13, bold=True)
-        self.chip_bg = RoundedView.alloc().initWithFrame_fill_radius_(
-            NSMakeRect(0, 0, 10, 10),
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(0.20, 0.45, 0.95, 1.0), 6)
-        self.chip = _label(12, bold=True)
-        self.chip_bg.addSubview_(self.chip)
-        self.strength = _label(12, color=dim)
-        self.estimate = _label(12)
-        self.override = _label(12, color=NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            1.0, 0.8, 0.35, 1.0))
-        for v in (self.state, self.chip_bg, self.strength, self.estimate, self.override):
-            self.root.addSubview_(v)
-        self._chip_text: str | None = None
-        self._layout()
+    def _action(self, payload: dict) -> None:
+        log.debug("overlay: page sent %r (nothing in it is clickable)", payload)
 
-    # -- content -------------------------------------------------------------------------
+    # -- state ---------------------------------------------------------------------------
+
+    def state(self) -> dict:
+        """Exactly what the page is being told to show. The tests assert on this."""
+        phase = ("hidden" if self._state is None
+                 else self._state if self._state in LIVE else "result")
+        result = None
+        if phase == "result":
+            glyph, text, tone = STATES.get(self._state, (None, self._state, "plain"))
+            result = {"glyph": glyph, "text": f"{text} · {self._detail}" if self._detail
+                      else text, "tone": tone}
+        return {"phase": phase, "position": self.position, "level": 0.0,
+                "result": result, "advice": self._advice or None}
+
+    def _push(self) -> None:
+        self.host.push(self.state())
 
     def show_state(self, state: str, detail: str = "") -> None:
-        text = STATE_TEXT.get(state, state)
-        self.state.setStringValue_(f"{text} · {detail}" if detail else text)
-        self._layout()
+        self._state, self._detail = state, detail
+        self._push()
+        if state == "recording":
+            self._start_meter()
+        else:
+            self._stop_meter()
         self._show()
+
+    # -- the live bars -------------------------------------------------------------------
+
+    def level_to_bar(self, db: float | None) -> float:
+        """dBFS -> 0..1. Zero at and below the silence floor: flat bars mean "Dict8 would
+        call this silence", which is the thing worth seeing while you speak."""
+        if db is None:
+            return 0.0
+        return min(max((db - self.floor_db) / METER_RANGE_DB, 0.0), 1.0)
+
+    def _start_meter(self) -> None:
+        self._stop_meter()
+
+        def tick(_timer):
+            self._tick()
+        self._meter = NSTimer.timerWithTimeInterval_repeats_block_(1 / METER_HZ, True, tick)
+        NSRunLoop.mainRunLoop().addTimer_forMode_(self._meter, NSRunLoopCommonModes)
+
+    def _stop_meter(self) -> None:
+        if self._meter is not None:
+            self._meter.invalidate()
+            self._meter = None
+
+    def _tick(self) -> None:
+        try:
+            level = self.level_to_bar(self.level_source() if self.level_source else None)
+        except Exception:
+            level = 0.0          # a failing source is flat bars, never a crash
+        self.host.push_level(level)
+
+    # -- the advice tag ------------------------------------------------------------------
 
     def clear_advice(self) -> None:
         self.set_advice(chip=None, strength=None, estimate=None, override=None)
@@ -158,59 +199,30 @@ class Overlay:
                    override: str | None) -> None:
         """Any argument None hides its line: no recommendation means no chip (invariant 2),
         never a placeholder model."""
-        self._chip_text = chip
-        self.chip.setStringValue_(chip or "")
-        self.strength.setStringValue_(strength or "")
-        self.estimate.setStringValue_(estimate or "")
-        self.override.setStringValue_(override or "")
-        self._layout()
-        self._show()
+        self._advice = {k: v for k, v in (("chip", chip), ("strength", strength),
+                                          ("estimate", estimate), ("override", override))
+                        if v}
+        self._push()
+        if self._state is not None:
+            self._show()
 
-    # -- geometry ------------------------------------------------------------------------
+    # -- visibility ----------------------------------------------------------------------
 
-    def _layout(self) -> None:
-        def size(v):
-            s = v.fittingSize()
-            return s.width, s.height
+    def _show(self) -> None:
+        if not self.visible:
+            self._position()
+            self.panel.orderFrontRegardless()  # never makeKeyAndOrderFront_: no focus, ever
+        self._schedule_dismiss()
 
-        rows: list[tuple[list, float]] = []           # ([(view, w, h)], row height)
-        sw, sh = size(self.state)
-        rows.append(([(self.state, sw, sh)], sh))
-        show_chip = bool(self._chip_text)
-        self.chip_bg.setHidden_(not show_chip)
-        self.strength.setHidden_(not show_chip or not self.strength.stringValue())
-        if show_chip:
-            cw, ch = size(self.chip)
-            bw, bh = cw + 2 * CHIP_PAD_X, ch + 2 * CHIP_PAD_Y
-            self.chip.setFrame_(NSMakeRect(CHIP_PAD_X, CHIP_PAD_Y, cw, ch))
-            row = [(self.chip_bg, bw, bh)]
-            if self.strength.stringValue():
-                stw, sth = size(self.strength)
-                row.append((self.strength, stw, sth))
-            rows.append((row, max(h for _, _, h in row)))
-        for v in (self.estimate, self.override):
-            v.setHidden_(not v.stringValue())
-            if v.stringValue():
-                w, h = size(v)
-                rows.append(([(v, w, h)], h))
+    def _schedule_dismiss(self) -> None:
+        self._gen += 1
+        gen = self._gen
+        delay = self.backstop_s if self._state in LIVE else self.dismiss_after_s
 
-        width = max(sum(w for _, w, _ in r) + GAP * (len(r) - 1) for r, _ in rows) + 2 * PAD
-        width = min(max(width, MIN_W), MAX_W)
-        height = sum(h for _, h in rows) + GAP * (len(rows) - 1) + 2 * PAD
-        y = height - PAD
-        for row, rh in rows:
-            y -= rh
-            x = PAD
-            for v, w, h in row:
-                w = min(w, width - PAD - x)
-                v.setFrame_(NSMakeRect(x, y + (rh - h) / 2, w, h))
-                x += w + GAP
-            y -= GAP
-        self.root.setFrame_(NSMakeRect(0, 0, width, height))
-        self.root.setNeedsDisplay_(True)
-        frame = self.panel.frame()
-        frame.size.width, frame.size.height = width, height
-        self.panel.setFrame_display_(frame, True)
+        def dismiss(_timer):
+            if gen == self._gen:
+                self.hide()
+        NSTimer.scheduledTimerWithTimeInterval_repeats_block_(delay, False, dismiss)
 
     def _position(self) -> None:
         loc = NSEvent.mouseLocation()
@@ -219,26 +231,18 @@ class Overlay:
         if screen is None:
             return
         vf = screen.visibleFrame()
-        f = self.panel.frame()
-        x = vf.origin.x + (vf.size.width - f.size.width) / 2
-        y = vf.origin.y + vf.size.height - f.size.height - TOP_MARGIN
+        x = vf.origin.x + (vf.size.width - CANVAS_W) / 2
+        y = (vf.origin.y + SCREEN_MARGIN if self.position == "bottom"
+             else vf.origin.y + vf.size.height - SCREEN_MARGIN - CANVAS_H)
         self.panel.setFrameOrigin_((x, y))
 
-    # -- visibility ----------------------------------------------------------------------
-
-    def _show(self) -> None:
-        self._position()
-        self.panel.orderFrontRegardless()   # never makeKeyAndOrderFront_: no focus, ever
-        self._gen += 1
-        gen = self._gen
-
-        def dismiss(_timer):
-            if gen == self._gen:
-                self.hide()
-        NSTimer.scheduledTimerWithTimeInterval_repeats_block_(self.dismiss_after_s, False,
-                                                              dismiss)
-
     def hide(self) -> None:
+        """At once: a too-short tap of the talk key vanishes the way it came."""
+        self._gen += 1
+        self._stop_meter()
+        self._state, self._detail = None, ""
+        self._advice = {}
+        self._push()
         self.panel.orderOut_(None)
 
     @property
@@ -258,12 +262,6 @@ class Overlay:
                                       & NSWindowStyleMaskNonactivatingPanel)}
 
     def snapshot(self, path: str) -> bool:
-        """Render the panel's content to a PNG — the panel's own pixels, no screen capture
-        (so no Screen Recording grant is involved)."""
-        view = self.root
-        rep = view.bitmapImageRepForCachingDisplayInRect_(view.bounds())
-        if rep is None:
-            return False
-        view.cacheDisplayInRect_toBitmapImageRep_(view.bounds(), rep)
-        data = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
-        return bool(data is not None and data.writeToFile_atomically_(path, True))
+        """The panel's own pixels to a PNG — WebKit renders it, so no Screen Recording
+        grant is involved."""
+        return self.host.snapshot(path)

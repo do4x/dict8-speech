@@ -54,12 +54,25 @@ a usage-cost range, and a live spend meter. Wispr Flow is the reference for *fee
 9. **Latency is the product.** Every commit keeps release→text within `latency_budget_ms`.
    `scripts/bench_latency.py` prints p50/p95 from the last 20 real dictations.
 
-## Stack (locked in ADR-001, do not revisit)
-Decision and rationale live in `docs/ADR-001-shell.md`. Summary: a single Python process —
-PyObjC for the menu-bar item, the non-activating overlay panel, `CGEventPost` injection and the
-`CGEventTap` hotkey; the STT model held warm in-process. No web shell, no sidecar, no native
-code to maintain. Shipped as a signed `.app` with a stable bundle ID, because the Accessibility
-grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-000-platform.md`.
+## Stack (locked in ADR-001 + ADR-003, do not revisit)
+One Python process (`docs/ADR-001-shell.md`): PyObjC for the menu-bar item, the
+non-activating overlay panel, `CGEventPost` injection and the `CGEventTap` hotkey; the STT
+model held warm in-process. No sidecar, no second runtime. Shipped as a signed `.app` with a
+stable bundle ID, because the Accessibility grant attaches to the bundle identity. Platform
+re-target recorded in `docs/ADR-000-platform.md`.
+
+**All UI is React + TypeScript + CSS** (`docs/ADR-003-ui.md`, Denis: "we usually default to
+css and react js for the best UI possible"). Source in `ui/`, built into `dict8/ui/web/`,
+rendered by a `WKWebView` inside that same process. Never hand-draw an interface in AppKit:
+`NSStackView` layout, `drawRect_` painting and CALayer chrome are not how this project builds
+UI. Python pushes one state object per surface and owns every string in it; the page owns how
+it looks. The only AppKit UI left is what has no web equivalent — the `NSStatusItem` menu and
+its menu items, the panel and window themselves, and `NSAlert`-class system dialogs.
+
+Working on the UI: `cd ui && npm install && npm run build` (or `npm run dev` plus
+`DICT8_UI_URL=http://localhost:5173 uv run --extra app dict8 app` for live reload). Either
+page opens in a plain browser with `?mock=<name>` — that, and Playwright against it, is the
+feedback loop; do not iterate by relaunching the app and squinting.
 
 ## Third-party
 - `claude-tokens` (PyPI, MIT, pure stdlib) — a CLI that reads the same JSONL files and
@@ -82,11 +95,14 @@ grant attaches to the bundle identity. Platform re-target recorded in `docs/ADR-
 - `dict8/usage/` — JSONL tail-reader, dedup index, SQLite writer, backfill
 - `dict8/advise/` — detector, classifier client, enhancer, config-driven model lookup, estimator
 - `dict8/hooks/` — UserPromptSubmit / PostToolUse / SessionEnd handlers (fail-open)
-- `dict8/ui/` — tray icon, overlay, toasts, the Dict8 window. Nothing else.
+- `dict8/ui/` — the menu-bar item, the panel and window that host the pages, the web bridge
+  (`webhost.py`), toasts, and the built UI in `web/`. Nothing else.
+- `ui/` — the React source for both surfaces (`npm run build` writes `dict8/ui/web/`)
 - `prompts/` — classifier and enhancer prompts + their eval sets
 - `docs/verified-schemas.md` — observed JSONL + hook payload shapes
 - `docs/ADR-000-platform.md` — platform re-target (windows -> macos), supersedes the seeded locks
 - `docs/ADR-001-shell.md` — locked stack decision
+- `docs/ADR-003-ui.md` — locked UI decision (React in a WKWebView), amends ADR-001
 - `docs/ADR-002-hotkey.md` — locked hotkey mechanism (Phase 3, not yet written)
 - `bench/` — STT benchmark harness + its results table
 

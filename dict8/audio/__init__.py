@@ -77,6 +77,21 @@ class Recorder:
             except Exception:
                 pass
 
+    def level(self) -> float | None:
+        """RMS of the newest block in dBFS, for the overlay's live bars; None when not
+        recording. Called from the main thread: it reads one block and leaves the audio
+        callback alone."""
+        if self._stream is None:
+            return None
+        with self._lock:
+            block = self._blocks[-1] if self._blocks else None
+        if block is None:
+            return None
+        import numpy as np
+
+        rms = float(np.sqrt(np.mean(np.square(block, dtype=np.float64)))) if block.size else 0.0
+        return 20 * float(np.log10(max(rms, 1e-10)))
+
     def cancel(self) -> None:
         self._close()
         with self._lock:

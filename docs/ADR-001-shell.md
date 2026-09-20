@@ -1,6 +1,7 @@
 # ADR-001: Application shell
 
-Status: Accepted (Phase 0) — **LOCKED**
+Status: Accepted (Phase 0) — **LOCKED**, amended 2026-09-20 by `docs/ADR-003-ui.md`
+(the UI is React in a WKWebView; the single-process shell below is unchanged)
 Date: 2026-09-14
 Decider: Denis
 Depends on: `docs/ADR-000-platform.md` (macOS / Apple Silicon)
